@@ -26,7 +26,23 @@ impl BamlExecutor {
         tracing::info!(?baml_src_dir, "Loading BAML runtime from directory");
         
         // Use from_directory which handles feature flags internally
-        let env_vars: HashMap<String, String> = HashMap::new(); // TODO: Load from environment
+        // Load environment variables - BAML uses these for API keys
+        let mut env_vars: HashMap<String, String> = HashMap::new();
+        
+        // Load OPENROUTER_API_KEY from environment if present
+        if let Ok(api_key) = std::env::var("OPENROUTER_API_KEY") {
+            env_vars.insert("OPENROUTER_API_KEY".to_string(), api_key);
+            tracing::debug!("Loaded OPENROUTER_API_KEY from environment");
+        }
+        
+        // Load other common API key environment variables
+        for key in &["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY"] {
+            if let Ok(value) = std::env::var(key) {
+                env_vars.insert(key.to_string(), value);
+                tracing::debug!(api_key = key, "Loaded API key from environment");
+            }
+        }
+        
         let feature_flags = internal_baml_core::feature_flags::FeatureFlags::default();
         
         let runtime = BamlRuntime::from_directory(baml_src_dir, env_vars, feature_flags)
@@ -64,7 +80,16 @@ impl BamlExecutor {
         let params = self.json_to_baml_map(&args)?;
         
         // Call the function
-        let env_vars = HashMap::new();
+        // Load environment variables for API keys
+        let mut env_vars = HashMap::new();
+        if let Ok(api_key) = std::env::var("OPENROUTER_API_KEY") {
+            env_vars.insert("OPENROUTER_API_KEY".to_string(), api_key);
+        }
+        for key in &["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY"] {
+            if let Ok(value) = std::env::var(key) {
+                env_vars.insert(key.to_string(), value);
+            }
+        }
         let tags = None;
         let cancel_tripwire = baml_runtime::TripWire::new(None);
         
@@ -115,7 +140,16 @@ impl BamlExecutor {
         let params = self.json_to_baml_map(&args)?;
         
         // Create stream function call
-        let env_vars = HashMap::new();
+        // Load environment variables for API keys
+        let mut env_vars = HashMap::new();
+        if let Ok(api_key) = std::env::var("OPENROUTER_API_KEY") {
+            env_vars.insert("OPENROUTER_API_KEY".to_string(), api_key);
+        }
+        for key in &["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY"] {
+            if let Ok(value) = std::env::var(key) {
+                env_vars.insert(key.to_string(), value);
+            }
+        }
         let tags = None;
         let cancel_tripwire = baml_runtime::TripWire::new(None);
         
