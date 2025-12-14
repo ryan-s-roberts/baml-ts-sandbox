@@ -27,13 +27,48 @@ pub struct QuickJSBridge {
 }
 
 impl QuickJSBridge {
-    /// Create a new QuickJS bridge
+    /// Create a new QuickJS bridge with default configuration
     pub fn new(baml_manager: Arc<Mutex<BamlRuntimeManager>>) -> Result<Self> {
-        tracing::info!("Initializing QuickJS bridge");
+        Self::new_with_config(baml_manager, crate::runtime::QuickJSConfig::default())
+    }
 
-        // Initialize QuickJS runtime using builder
-        let runtime = QuickJsRuntimeBuilder::new()
-            .build();
+    /// Create a new QuickJS bridge with custom configuration
+    /// 
+    /// # Arguments
+    /// * `baml_manager` - The BAML runtime manager to use
+    /// * `config` - QuickJS runtime configuration options
+    pub fn new_with_config(
+        baml_manager: Arc<Mutex<BamlRuntimeManager>>,
+        config: crate::runtime::QuickJSConfig,
+    ) -> Result<Self> {
+        tracing::info!(
+            memory_limit = ?config.memory_limit,
+            max_stack_size = ?config.max_stack_size,
+            gc_threshold = ?config.gc_threshold,
+            gc_interval = ?config.gc_interval,
+            "Initializing QuickJS bridge with configuration"
+        );
+
+        // Initialize QuickJS runtime using builder and apply configuration
+        let mut builder = QuickJsRuntimeBuilder::new();
+        
+        if let Some(limit) = config.memory_limit {
+            builder = builder.memory_limit(limit);
+        }
+        
+        if let Some(stack_size) = config.max_stack_size {
+            builder = builder.max_stack_size(stack_size);
+        }
+        
+        if let Some(threshold) = config.gc_threshold {
+            builder = builder.gc_threshold(threshold);
+        }
+        
+        if let Some(interval) = config.gc_interval {
+            builder = builder.gc_interval(interval);
+        }
+        
+        let runtime = builder.build();
 
         Ok(Self {
             runtime,

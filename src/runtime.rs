@@ -7,7 +7,70 @@ use crate::error::{BamlRtError, Result};
 use crate::quickjs_bridge::QuickJSBridge;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
+
+/// Configuration for QuickJS runtime options
+/// 
+/// These options map directly to the available options in `quickjs_runtime::builder::QuickJsRuntimeBuilder`.
+#[derive(Debug, Clone)]
+pub struct QuickJSConfig {
+    /// Maximum memory limit in bytes (None = no limit)
+    pub memory_limit: Option<u64>,
+    
+    /// Maximum stack size in bytes (None = default)
+    pub max_stack_size: Option<u64>,
+    
+    /// Number of allocations before garbage collection runs (None = default)
+    pub gc_threshold: Option<u64>,
+    
+    /// Garbage collection interval - triggers a full GC every set interval (None = disabled)
+    pub gc_interval: Option<Duration>,
+}
+
+impl Default for QuickJSConfig {
+    fn default() -> Self {
+        Self {
+            memory_limit: None,
+            max_stack_size: None,
+            gc_threshold: None,
+            gc_interval: None,
+        }
+    }
+}
+
+impl QuickJSConfig {
+    /// Create a new QuickJS configuration with defaults
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set memory limit in bytes
+    pub fn with_memory_limit(mut self, limit: Option<u64>) -> Self {
+        self.memory_limit = limit;
+        self
+    }
+
+    /// Set maximum stack size in bytes
+    pub fn with_max_stack_size(mut self, size: Option<u64>) -> Self {
+        self.max_stack_size = size;
+        self
+    }
+
+    /// Set garbage collection threshold (number of allocations before GC runs)
+    pub fn with_gc_threshold(mut self, threshold: Option<u64>) -> Self {
+        self.gc_threshold = threshold;
+        self
+    }
+
+    /// Set garbage collection interval
+    /// 
+    /// This will start a timer thread which triggers a full GC every set interval.
+    pub fn with_gc_interval(mut self, interval: Option<Duration>) -> Self {
+        self.gc_interval = interval;
+        self
+    }
+}
 
 /// Configuration for the BAML runtime environment
 #[derive(Debug, Clone)]
@@ -18,6 +81,9 @@ pub struct RuntimeConfig {
     /// Whether to enable QuickJS bridge
     pub enable_quickjs: bool,
     
+    /// QuickJS-specific configuration (only used if enable_quickjs is true)
+    pub quickjs_config: QuickJSConfig,
+    
     /// Additional environment variables to pass to BAML runtime
     pub env_vars: Vec<(String, String)>,
 }
@@ -27,6 +93,7 @@ impl Default for RuntimeConfig {
         Self {
             schema_path: None,
             enable_quickjs: false,
+            quickjs_config: QuickJSConfig::default(),
             env_vars: Vec::new(),
         }
     }
@@ -47,6 +114,15 @@ impl RuntimeConfig {
     /// Enable QuickJS bridge
     pub fn with_quickjs(mut self, enable: bool) -> Self {
         self.enable_quickjs = enable;
+        self
+    }
+
+    /// Configure QuickJS runtime options
+    /// 
+    /// This allows fine-grained control over the QuickJS runtime behavior,
+    /// including memory limits, stack size, and module loading.
+    pub fn with_quickjs_config(mut self, config: QuickJSConfig) -> Self {
+        self.quickjs_config = config;
         self
     }
 
@@ -113,6 +189,32 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Configure QuickJS runtime options
+    /// 
+    /// This allows fine-grained control over the QuickJS runtime behavior,
+    /// including memory limits, stack size, and garbage collection settings.
+    /// 
+    /// # Example
+    /// ```rust,no_run
+    /// use baml_rt::{RuntimeBuilder, QuickJSConfig};
+    /// use std::time::Duration;
+    /// 
+    /// let runtime = RuntimeBuilder::new()
+    ///     .with_quickjs(true)
+    ///     .with_quickjs_config(
+    ///         QuickJSConfig::new()
+    ///             .with_memory_limit(Some(64 * 1024 * 1024)) // 64MB limit
+    ///             .with_max_stack_size(Some(1024 * 1024)) // 1MB stack
+    ///             .with_gc_interval(Some(Duration::from_secs(30))) // GC every 30 seconds
+    ///     )
+    ///     .build()
+    ///     .await?;
+    /// ```
+    pub fn with_quickjs_config(mut self, config: QuickJSConfig) -> Self {
+        self.config.quickjs_config = config;
+        self
+    }
+
     /// Add an environment variable
     pub fn with_env_var(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.config.env_vars.push((key.into(), value.into()));
@@ -140,7 +242,10 @@ impl RuntimeBuilder {
 
         // Create QuickJS bridge if enabled
         let quickjs_bridge = if self.config.enable_quickjs {
-            let mut bridge = QuickJSBridge::new(baml_manager.clone())?;
+            let mut bridge = QuickJSBridge::new_with_config(
+                baml_manager.clone(),
+                self.config.quickjs_config.clone(),
+            )?;
             bridge.register_baml_functions().await?;
             Some(Arc::new(Mutex::new(bridge)))
         } else {

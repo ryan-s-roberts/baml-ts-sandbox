@@ -16,5 +16,5 @@ pub mod runtime;
 pub mod traits;
 
 pub use error::{BamlRtError, Result};
-pub use runtime::{Runtime, RuntimeBuilder, RuntimeConfig};
+pub use runtime::{Runtime, RuntimeBuilder, RuntimeConfig, QuickJSConfig};
 
