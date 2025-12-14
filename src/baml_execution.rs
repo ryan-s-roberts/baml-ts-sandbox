@@ -4,25 +4,32 @@
 //! from the BAML compiler.
 
 use crate::error::{BamlRtError, Result};
-use baml_runtime::{BamlRuntime, FunctionResult, FunctionResultStream, RuntimeContextManager};
+use crate::tools::ToolRegistry;
+use baml_runtime::{BamlRuntime, FunctionResultStream, RuntimeContextManager};
 use baml_types::BamlValue;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 /// BAML execution engine that executes BAML IL
 pub struct BamlExecutor {
     runtime: Arc<BamlRuntime>,
     ctx_manager: RuntimeContextManager,
     pub(crate) functions: HashMap<String, String>, // function name -> placeholder (for discovery)
+    tool_registry: Arc<Mutex<ToolRegistry>>,
 }
 
 impl BamlExecutor {
     /// Load BAML IL from the compiled output
     /// 
     /// This loads the BAML runtime from the baml_src directory using from_directory
-    pub fn load_il(_baml_client_dir: &Path, baml_src_dir: &Path) -> Result<Self> {
+    pub fn load_il(
+        _baml_client_dir: &Path,
+        baml_src_dir: &Path,
+        tool_registry: Arc<Mutex<ToolRegistry>>,
+    ) -> Result<Self> {
         tracing::info!(?baml_src_dir, "Loading BAML runtime from directory");
         
         // Use from_directory which handles feature flags internally
@@ -61,6 +68,7 @@ impl BamlExecutor {
             runtime: Arc::new(runtime),
             ctx_manager,
             functions: function_map,
+            tool_registry,
         })
     }
 
@@ -69,6 +77,7 @@ impl BamlExecutor {
         &self,
         function_name: &str,
         args: Value,
+        tool_registry: Option<Arc<Mutex<ToolRegistry>>>,
     ) -> Result<Value> {
         tracing::debug!(
             function = function_name,
@@ -93,6 +102,9 @@ impl BamlExecutor {
         let tags = None;
         let cancel_tripwire = baml_runtime::TripWire::new(None);
         
+        // TODO: Integrate tool registry with BAML's function calling mechanism
+        // For now, tools are registered but not passed to the LLM
+        // This requires understanding BAML's native tool calling support
         let (result, _call_id) = self.runtime.call_function(
             function_name.to_string(),
             &params,
@@ -196,16 +208,16 @@ impl BamlExecutor {
                 } else if let Some(f) = n.as_f64() {
                     Ok(BamlValue::Float(f))
                 } else {
-                    Err(BamlRtError::InvalidArgument("Invalid number".to_string()))
+                    Err(BamlRtError::TypeConversion(format!("Invalid number: {}", n)))
                 }
             }
             Value::Bool(b) => Ok(BamlValue::Bool(*b)),
-            Value::Null => Ok(BamlValue::Null),
             Value::Array(arr) => {
-                let vec: Result<Vec<BamlValue>> = arr.iter()
-                    .map(|v| self.json_to_baml_value(v))
-                    .collect();
-                Ok(BamlValue::List(vec?))
+                let mut vec = Vec::new();
+                for item in arr {
+                    vec.push(self.json_to_baml_value(item)?);
+                }
+                Ok(BamlValue::List(vec))
             }
             Value::Object(obj) => {
                 let mut map = baml_types::BamlMap::new();
@@ -214,25 +226,25 @@ impl BamlExecutor {
                 }
                 Ok(BamlValue::Map(map))
             }
+            Value::Null => Ok(BamlValue::Null),
         }
     }
-    
-    /// Convert BamlValue to JSON Value
+
+    #[allow(dead_code)]
     fn baml_value_to_json(&self, value: &BamlValue) -> Result<Value> {
         match value {
             BamlValue::String(s) => Ok(Value::String(s.clone())),
             BamlValue::Int(i) => Ok(Value::Number((*i).into())),
-            BamlValue::Float(f) => Ok(Value::Number(
-                serde_json::Number::from_f64(*f)
-                    .ok_or_else(|| BamlRtError::TypeConversion("Invalid float".to_string()))?
-            )),
+            BamlValue::Float(f) => Ok(serde_json::Number::from_f64(*f)
+                .ok_or_else(|| BamlRtError::TypeConversion("Invalid float".to_string()))?
+                .into()),
             BamlValue::Bool(b) => Ok(Value::Bool(*b)),
-            BamlValue::Null => Ok(Value::Null),
             BamlValue::List(list) => {
-                let vec: Result<Vec<Value>> = list.iter()
-                    .map(|v| self.baml_value_to_json(v))
-                    .collect();
-                Ok(Value::Array(vec?))
+                let mut arr = Vec::new();
+                for item in list {
+                    arr.push(self.baml_value_to_json(item)?);
+                }
+                Ok(Value::Array(arr))
             }
             BamlValue::Map(map) => {
                 let mut obj = serde_json::Map::new();
@@ -241,13 +253,24 @@ impl BamlExecutor {
                 }
                 Ok(Value::Object(obj))
             }
-            _ => Err(BamlRtError::TypeConversion(
-                format!("Unsupported BamlValue type: {:?}", value)
-            )),
+            BamlValue::Null => Ok(Value::Null),
+            BamlValue::Media(_) => Err(BamlRtError::TypeConversion("Media not supported in JSON conversion".to_string())),
+            BamlValue::Enum(name, value) => {
+                // Enums are represented as objects with the enum name
+                let mut obj = serde_json::Map::new();
+                obj.insert("__type".to_string(), Value::String(name.clone()));
+                obj.insert("value".to_string(), Value::String(value.clone()));
+                Ok(Value::Object(obj))
+            }
+            BamlValue::Class(name, fields) => {
+                // Classes are represented as objects
+                let mut obj = serde_json::Map::new();
+                obj.insert("__type".to_string(), Value::String(name.clone()));
+                for (k, v) in fields.iter() {
+                    obj.insert(k.clone(), self.baml_value_to_json(v)?);
+                }
+                Ok(Value::Object(obj))
+            }
         }
-    }
-
-    pub fn list_functions(&self) -> Vec<String> {
-        self.functions.keys().cloned().collect()
     }
 }

@@ -61,6 +61,112 @@ impl QuickJSBridge {
             self.register_single_stream_function(&function_name).await?;
         }
 
+        // Register tool functions
+        self.register_tool_functions().await?;
+
+        Ok(())
+    }
+
+    /// Register all tool functions with QuickJS
+    async fn register_tool_functions(&mut self) -> Result<()> {
+        tracing::info!("Registering tool functions with QuickJS");
+        
+        let manager = self.baml_manager.lock().await;
+        let tools = manager.list_tools().await;
+        drop(manager);
+
+        for tool_name in tools {
+            self.register_single_tool(&tool_name).await?;
+        }
+
+        // Register helper function to execute tools
+        self.register_tool_invoke_helper().await?;
+
+        Ok(())
+    }
+
+    /// Register a single tool function with QuickJS
+    async fn register_single_tool(&mut self, tool_name: &str) -> Result<()> {
+        let manager_clone = self.baml_manager.clone();
+        let tool_name_clone = tool_name.to_string();
+
+        // Register a JavaScript wrapper function for the tool
+        let js_code = format!(
+            r#"
+            globalThis.{} = async function(...args) {{
+                const argObj = {{}};
+                if (args.length === 1 && typeof args[0] === 'object') {{
+                    Object.assign(argObj, args[0]);
+                }} else {{
+                    args.forEach((arg, idx) => {{
+                        argObj[`arg${{idx}}`] = arg;
+                    }});
+                }}
+                return await __tool_invoke("{}", JSON.stringify(argObj));
+            }};
+            "#,
+            tool_name, tool_name
+        );
+
+        let script = Script::new("register_tool.js", &js_code);
+        self.runtime
+            .eval(None, script)
+            .await
+            .map_err(|e| BamlRtError::QuickJs(format!("Failed to register tool function: {}", e)))?;
+
+        tracing::debug!(tool = tool_name, "Registered tool function with QuickJS");
+        Ok(())
+    }
+
+    /// Register helper function for tool invocation
+    async fn register_tool_invoke_helper(&mut self) -> Result<()> {
+        let manager_clone = self.baml_manager.clone();
+
+        self.runtime.set_function(
+            &[],
+            "__tool_invoke",
+            move |_realm: &QuickJsRealmAdapter, args: Vec<JsValueFacade>| -> std::result::Result<JsValueFacade, quickjs_runtime::jsutils::JsError> {
+                if args.len() < 2 {
+                    return Err(quickjs_runtime::jsutils::JsError::new_str("Expected 2 arguments: tool_name and args"));
+                }
+
+                let tool_name_js = &args[0];
+                let tool_name = if tool_name_js.is_string() {
+                    tool_name_js.get_str().to_string()
+                } else {
+                    return Err(quickjs_runtime::jsutils::JsError::new_str("First argument must be a string (tool name)"));
+                };
+
+                let args_js = &args[1];
+                let args_json_str = if args_js.is_string() {
+                    args_js.get_str().to_string()
+                } else {
+                    return Err(quickjs_runtime::jsutils::JsError::new_str("Args must be a JSON string"));
+                };
+
+                let args_json: Value = serde_json::from_str(&args_json_str)
+                    .map_err(|e| quickjs_runtime::jsutils::JsError::new_str(&format!("Failed to parse JSON args: {}", e)))?;
+
+                let manager = manager_clone.clone();
+                let tool_name_clone = tool_name.clone();
+
+                Ok(JsValueFacade::new_promise::<JsValueFacade, _, ()>(async move {
+                    let manager = manager.lock().await;
+                    let result = manager.execute_tool(&tool_name_clone, args_json).await;
+
+                    match result {
+                        Ok(json_value) => {
+                            Ok(value_to_js_value_facade(json_value))
+                        }
+                        Err(e) => {
+                            Err(quickjs_runtime::jsutils::JsError::new_str(&format!("Tool execution error: {}", e)))
+                        }
+                    }
+                }))
+            },
+        ).map_err(|e| BamlRtError::QuickJs(format!("Failed to register tool helper function: {}", e)))?;
+
+        tracing::debug!("Registered __tool_invoke helper function");
         Ok(())
     }
 

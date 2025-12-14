@@ -3,7 +3,13 @@
 use crate::baml_execution::BamlExecutor;
 use crate::error::{BamlRtError, Result};
 use crate::types::FunctionSignature;
+use crate::tools::{ToolRegistry, ToolMetadata};
+use crate::tool_mapper::ToolMapper;
+use serde_json::Value;
 use std::collections::HashMap;
+use std::future::Future;
+use std::sync::Arc;
+use tokio::sync::Mutex as TokioMutex;
 
 // BAML executes in Rust. We will implement execution of BAML functions
 // in Rust, then map those function calls to QuickJS so JavaScript can invoke them.
@@ -13,6 +19,8 @@ use std::collections::HashMap;
 pub struct BamlRuntimeManager {
     function_registry: HashMap<String, FunctionSignature>,
     pub(crate) executor: Option<BamlExecutor>,
+    tool_registry: Arc<TokioMutex<ToolRegistry>>,
+    tool_mapper: ToolMapper,
 }
 
 impl BamlRuntimeManager {
@@ -23,6 +31,8 @@ impl BamlRuntimeManager {
         Ok(Self {
             function_registry: HashMap::new(),
             executor: None,
+            tool_registry: Arc::new(TokioMutex::new(ToolRegistry::new())),
+            tool_mapper: ToolMapper::new(),
         })
     }
 
@@ -66,8 +76,9 @@ impl BamlRuntimeManager {
             ));
         }
         
-        // Load BAML IL into executor
-        self.executor = Some(BamlExecutor::load_il(&client_dir, &baml_src_dir)?);
+        // Load BAML IL into executor (pass tool registry)
+        let tool_registry_clone = self.tool_registry.clone();
+        self.executor = Some(BamlExecutor::load_il(&client_dir, &baml_src_dir, tool_registry_clone)?);
         
         // Discover functions from generated code for registration
         let inlined_file = client_dir.join("inlinedbaml.ts");
@@ -129,7 +140,9 @@ impl BamlRuntimeManager {
         let executor = self.executor.as_ref()
             .ok_or_else(|| BamlRtError::BamlRuntime("BAML runtime not loaded".to_string()))?;
         
-        executor.execute_function(function_name, args).await
+        // Pass tool registry to executor for potential integration
+        let tool_registry = Some(self.tool_registry.clone());
+        executor.execute_function(function_name, args, tool_registry).await
     }
 
     /// Invoke a BAML function with streaming support
@@ -162,6 +175,104 @@ impl BamlRuntimeManager {
     /// List all available BAML functions
     pub fn list_functions(&self) -> Vec<String> {
         self.function_registry.keys().cloned().collect()
+    }
+
+    /// Get the tool registry (for tool registration)
+    pub fn tool_registry(&self) -> Arc<TokioMutex<ToolRegistry>> {
+        self.tool_registry.clone()
+    }
+
+    /// Register a tool that implements the BamlTool trait
+    /// 
+    /// Tools can be called by LLMs during BAML function execution
+    /// or directly from JavaScript via the QuickJS bridge.
+    /// 
+    /// # Example
+    /// ```rust,no_run
+    /// use baml_rt::baml::BamlRuntimeManager;
+    /// use baml_rt::tools::BamlTool;
+    /// use serde_json::json;
+    /// 
+    /// struct MyTool;
+    /// 
+    /// #[async_trait::async_trait]
+    /// impl BamlTool for MyTool {
+    ///     const NAME: &'static str = "my_tool";
+    ///     fn description(&self) -> &'static str { "Does something" }
+    ///     fn input_schema(&self) -> serde_json::Value { json!({}) }
+    ///     async fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value> {
+    ///         Ok(json!({"result": "success"}))
+    ///     }
+    /// }
+    /// 
+    /// let manager = BamlRuntimeManager::new()?;
+    /// manager.register_tool(MyTool).await?;
+    /// ```
+    pub async fn register_tool<T: crate::tools::BamlTool>(&mut self, tool: T) -> Result<()> {
+        let mut registry = self.tool_registry.lock().await;
+        registry.register(tool)
+    }
+
+    /// Execute a tool function by name
+    pub async fn execute_tool(&self, name: &str, args: Value) -> Result<Value> {
+        let registry = self.tool_registry.lock().await;
+        registry.execute(name, args).await
+    }
+
+    /// List all registered tools
+    pub async fn list_tools(&self) -> Vec<String> {
+        let registry = self.tool_registry.lock().await;
+        registry.list_tools()
+    }
+
+    /// Get tool metadata
+    pub async fn get_tool_metadata(&self, name: &str) -> Option<ToolMetadata> {
+        let registry = self.tool_registry.lock().await;
+        registry.get_metadata(name).cloned()
+    }
+
+    /// Map a BAML union variant to a tool function
+    /// 
+    /// This connects BAML's structured output (union types) to our Rust tool registry.
+    /// When BAML returns a union variant representing a tool choice, we can execute
+    /// the corresponding Rust tool function.
+    /// 
+    /// # Arguments
+    /// * `baml_variant_name` - The name of the BAML class/union variant (e.g., "WeatherTool")
+    /// * `tool_function_name` - The name of the registered Rust tool function (e.g., "get_weather")
+    /// 
+    /// # Example
+    /// ```rust,no_run
+    /// // Register a tool
+    /// manager.register_tool("get_weather", "...", schema, func).await?;
+    /// 
+    /// // Map BAML union variant to tool
+    /// manager.map_baml_variant_to_tool("WeatherTool", "get_weather");
+    /// 
+    /// // When BAML returns a WeatherTool variant, it will automatically map to get_weather
+    /// ```
+    pub fn map_baml_variant_to_tool(
+        &mut self,
+        baml_variant_name: impl Into<String>,
+        tool_function_name: impl Into<String>,
+    ) {
+        self.tool_mapper.register_mapping(baml_variant_name, tool_function_name);
+    }
+
+    /// Execute a tool from a BAML union type result
+    /// 
+    /// Takes a BAML result (which should be a union variant representing a tool choice),
+    /// maps it to the appropriate tool function, and executes it.
+    /// 
+    /// # Arguments
+    /// * `baml_result` - The JSON result from BAML function (union variant)
+    /// 
+    /// # Returns
+    /// The result of executing the tool function
+    pub async fn execute_tool_from_baml_result(&self, baml_result: Value) -> Result<Value> {
+        self.tool_mapper
+            .execute_from_baml_result(baml_result, &self.tool_registry)
+            .await
     }
 }
 

@@ -10,6 +10,8 @@ pub mod types;
 pub mod error;
 pub mod js_value_converter;
 pub mod context;
+pub mod tools;
+pub mod tool_mapper;
 
 pub use error::{BamlRtError, Result};
 
