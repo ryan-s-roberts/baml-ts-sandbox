@@ -12,7 +12,7 @@ use quickjs_runtime::jsutils::Script;
 use quickjs_runtime::quickjsrealmadapter::QuickJsRealmAdapter;
 use quickjs_runtime::values::{JsValueConvertable, JsValueFacade};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -23,6 +23,7 @@ use tokio::sync::Mutex;
 pub struct QuickJSBridge {
     runtime: QuickJsRuntimeFacade,
     baml_manager: Arc<Mutex<BamlRuntimeManager>>,
+    js_tools: HashSet<String>, // Track JavaScript-only tools
 }
 
 impl QuickJSBridge {
@@ -37,6 +38,7 @@ impl QuickJSBridge {
         Ok(Self {
             runtime,
             baml_manager,
+            js_tools: HashSet::new(),
         })
     }
 
@@ -262,6 +264,93 @@ impl QuickJSBridge {
         Ok(())
     }
 
+    /// Register a JavaScript tool function
+    /// 
+    /// JavaScript tools are implemented entirely in JavaScript and run in the QuickJS runtime.
+    /// They are NOT available to Rust - they only exist in the JavaScript context.
+    /// 
+    /// # Arguments
+    /// * `name` - The name of the tool (will be available as `globalThis.<name>`)
+    /// * `js_function_code` - JavaScript function code (should be a complete function definition)
+    /// 
+    /// # Example
+    /// ```rust,no_run
+    /// bridge.register_js_tool("greet_js", r#"
+    ///     async function(name) {
+    ///         return { greeting: `Hello, ${name}!` };
+    ///     }
+    /// "#).await?;
+    /// ```
+    /// 
+    /// The tool will be available in JavaScript as:
+    /// ```javascript
+    /// const result = await greet_js("World");
+    /// ```
+    pub async fn register_js_tool(
+        &mut self,
+        name: impl Into<String>,
+        js_function_code: impl AsRef<str>,
+    ) -> Result<()> {
+        let tool_name = name.into();
+        let function_code = js_function_code.as_ref();
+
+        // Check if tool name conflicts with existing Rust tools
+        {
+            let manager = self.baml_manager.lock().await;
+            let rust_tools = manager.list_tools().await;
+            if rust_tools.contains(&tool_name) {
+                return Err(BamlRtError::InvalidArgument(format!(
+                    "Tool name '{}' conflicts with existing Rust tool",
+                    tool_name
+                )));
+            }
+        }
+
+        // Check if already registered as a JS tool
+        if self.js_tools.contains(&tool_name) {
+            return Err(BamlRtError::InvalidArgument(format!(
+                "JavaScript tool '{}' is already registered",
+                tool_name
+            )));
+        }
+
+        // Register the JavaScript function in the QuickJS runtime
+        let js_code = format!(
+            r#"
+            globalThis.{} = {};
+            "#,
+            tool_name, function_code
+        );
+
+        let script = Script::new("register_js_tool.js", &js_code);
+        self.runtime
+            .eval(None, script)
+            .await
+            .map_err(|e| BamlRtError::QuickJs(format!(
+                "Failed to register JavaScript tool '{}': {}",
+                tool_name, e
+            )))?;
+
+        self.js_tools.insert(tool_name.clone());
+
+        tracing::info!(
+            tool = tool_name.as_str(),
+            "Registered JavaScript tool function"
+        );
+
+        Ok(())
+    }
+
+    /// List all registered JavaScript tools
+    pub fn list_js_tools(&self) -> Vec<String> {
+        self.js_tools.iter().cloned().collect()
+    }
+
+    /// Check if a tool name is a JavaScript tool (not a Rust tool)
+    pub fn is_js_tool(&self, name: &str) -> bool {
+        self.js_tools.contains(name)
+    }
+
     /// Register a helper function for streaming BAML function execution
     async fn register_baml_stream_helper(&mut self) -> Result<()> {
         let manager_clone = self.baml_manager.clone();
@@ -316,7 +405,16 @@ impl QuickJSBridge {
                         let stream_result = manager.invoke_function_stream(&func_name_stream, args_json_stream);
                         
                         // Get context manager reference while we have the lock
-                        let executor_ref = manager.executor.as_ref().unwrap();
+                        let executor_ref = match manager.executor.as_ref() {
+                            Some(exec) => exec,
+                            None => {
+                                let error_value = serde_json::json!({
+                                    "error": "BAML executor not initialized"
+                                });
+                                let _ = tx.send(error_value).await;
+                                return;
+                            }
+                        };
                         let ctx_manager = executor_ref.ctx_manager();
                         
                         // Create the stream
@@ -486,7 +584,7 @@ impl QuickJSBridge {
         if js_result.is_string() {
             let json_str = js_result.get_str();
             serde_json::from_str(json_str)
-                .map_err(|e| BamlRtError::TypeConversion(format!("Failed to parse JSON result: {}", e)))
+                .map_err(BamlRtError::Json)
         } else {
             // Result might be a promise
             // Since eval() is synchronous, we can't await promises directly

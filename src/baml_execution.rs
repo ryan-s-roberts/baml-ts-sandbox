@@ -121,15 +121,17 @@ impl BamlExecutor {
             .map_err(|e| BamlRtError::BamlRuntime(format!("Function execution failed: {}", e)))?;
         
         // Extract the parsed value
-        let parsed = function_result.parsed()
+        let parsed_opt = function_result.parsed();
+        let parsed_result = parsed_opt
             .as_ref()
-            .ok_or_else(|| BamlRtError::BamlRuntime("Function returned no parsed result".to_string()))?
+            .ok_or_else(|| BamlRtError::BamlRuntime("Function returned no parsed result".to_string()))?;
+        let parsed = parsed_result
             .as_ref()
             .map_err(|e| BamlRtError::BamlRuntime(format!("Parsing failed: {}", e)))?;
         
         // Convert ResponseBamlValue to JSON using serialize_partial
         let json_value = serde_json::to_value(parsed.serialize_partial())
-            .map_err(|e| BamlRtError::TypeConversion(format!("Failed to serialize: {}", e)))?;
+            .map_err(BamlRtError::Json)?;
         
         Ok(json_value)
     }

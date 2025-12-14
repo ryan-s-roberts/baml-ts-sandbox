@@ -81,7 +81,10 @@ impl ToolMapper {
         let (variant_name, tool_obj_value) = if let Some(obj) = baml_result.as_object() {
             // Check if it's a single-key object where the key is a variant name
             if obj.len() == 1 {
-                let (key, value) = obj.iter().next().unwrap();
+                let (key, value) = obj.iter().next()
+                    .ok_or_else(|| BamlRtError::InvalidArgument(
+                        "Expected non-empty object with tool variant".to_string()
+                    ))?;
                 // Check if this key matches a known variant
                 if self.variant_to_tool.contains_key(key) {
                     (key.clone(), value.clone())

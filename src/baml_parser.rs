@@ -25,19 +25,37 @@ impl BamlParser {
         // Pattern to match BAML function definitions - simplified to handle our case
         let function_pattern = Regex::new(
             r"function\s+(\w+)\s*\(([^)]*)\)\s*->\s*(\w+)\s*\{([^}]+)\}"
-        ).unwrap();
+        ).map_err(|e| BamlRtError::SchemaLoading(format!("Invalid regex pattern: {}", e)))?;
 
         for cap in function_pattern.captures_iter(content) {
-            let name = cap.get(1).unwrap().as_str().to_string();
-            let params_str = cap.get(2).unwrap().as_str();
-            let _return_type = cap.get(3).unwrap().as_str();
-            let body = cap.get(4).unwrap().as_str();
+            let name = cap.get(1)
+                .ok_or_else(|| BamlRtError::SchemaLoading(
+                    "Failed to extract function name".to_string()
+                ))?
+                .as_str()
+                .to_string();
+            let params_str = cap.get(2)
+                .ok_or_else(|| BamlRtError::SchemaLoading(
+                    "Failed to extract parameters".to_string()
+                ))?
+                .as_str();
+            let _return_type = cap.get(3)
+                .ok_or_else(|| BamlRtError::SchemaLoading(
+                    "Failed to extract return type".to_string()
+                ))?
+                .as_str();
+            let body = cap.get(4)
+                .ok_or_else(|| BamlRtError::SchemaLoading(
+                    "Failed to extract function body".to_string()
+                ))?
+                .as_str();
 
             // Parse parameters
             let parameters = Self::parse_parameters(params_str)?;
 
             // Extract client
-            let client_pattern = Regex::new(r#"client\s+"([^"]+)""#).unwrap();
+            let client_pattern = Regex::new(r#"client\s+"([^"]+)""#)
+                .map_err(|e| BamlRtError::SchemaLoading(format!("Invalid client regex: {}", e)))?;
             let client = client_pattern
                 .captures(body)
                 .and_then(|c| c.get(1))
@@ -45,7 +63,8 @@ impl BamlParser {
                 .unwrap_or_else(|| "unknown".to_string());
 
             // Extract prompt template - handle #"..."# format
-            let prompt_pattern = Regex::new(r#"prompt\s+#"([^"]+)"#"#).unwrap();
+            let prompt_pattern = Regex::new(r#"prompt\s+#"([^"]+)"#"#)
+                .map_err(|e| BamlRtError::SchemaLoading(format!("Invalid prompt regex: {}", e)))?;
             let mut prompt_template = String::new();
             if let Some(cap) = prompt_pattern.captures(body) {
                 if let Some(m) = cap.get(1) {

@@ -3,11 +3,12 @@
 use crate::baml_execution::BamlExecutor;
 use crate::error::{BamlRtError, Result};
 use crate::types::FunctionSignature;
-use crate::tools::{ToolRegistry, ToolMetadata};
+use crate::tools::{ToolRegistry as ConcreteToolRegistry, ToolMetadata};
 use crate::tool_mapper::ToolMapper;
+use crate::traits::{BamlFunctionExecutor, SchemaLoader};
+use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 
@@ -19,7 +20,7 @@ use tokio::sync::Mutex as TokioMutex;
 pub struct BamlRuntimeManager {
     function_registry: HashMap<String, FunctionSignature>,
     pub(crate) executor: Option<BamlExecutor>,
-    tool_registry: Arc<TokioMutex<ToolRegistry>>,
+    tool_registry: Arc<TokioMutex<ConcreteToolRegistry>>,
     tool_mapper: ToolMapper,
 }
 
@@ -31,9 +32,14 @@ impl BamlRuntimeManager {
         Ok(Self {
             function_registry: HashMap::new(),
             executor: None,
-            tool_registry: Arc::new(TokioMutex::new(ToolRegistry::new())),
+            tool_registry: Arc::new(TokioMutex::new(ConcreteToolRegistry::new())),
             tool_mapper: ToolMapper::new(),
         })
+    }
+
+    /// Check if a schema is loaded
+    pub fn is_schema_loaded(&self) -> bool {
+        self.executor.is_some()
     }
 
     /// Load a compiled BAML schema/configuration
@@ -87,9 +93,15 @@ impl BamlRuntimeManager {
                 .map_err(|e| BamlRtError::Io(e))?;
             
             use regex::Regex;
-            let re = Regex::new(r"function\s+(\w+)\s*\(").unwrap();
+            let re = Regex::new(r"function\s+(\w+)\s*\(")
+                .map_err(|e| BamlRtError::SchemaLoading(format!("Invalid regex pattern: {}", e)))?;
             for cap in re.captures_iter(&content) {
-                let func_name = cap.get(1).unwrap().as_str().to_string();
+                let func_name = cap.get(1)
+                    .ok_or_else(|| BamlRtError::SchemaLoading(
+                        "Failed to extract function name from regex capture".to_string()
+                    ))?
+                    .as_str()
+                    .to_string();
                 
                 // Functions are discovered from the runtime's IR, not stored separately
                 
@@ -119,6 +131,9 @@ impl BamlRuntimeManager {
     }
 
     /// Execute a BAML function with the given arguments
+    /// 
+    /// This is the main entry point for executing BAML functions.
+    /// It validates the function exists and delegates to the executor.
     pub async fn invoke_function(
         &self,
         function_name: &str,
@@ -178,7 +193,7 @@ impl BamlRuntimeManager {
     }
 
     /// Get the tool registry (for tool registration)
-    pub fn tool_registry(&self) -> Arc<TokioMutex<ToolRegistry>> {
+    pub fn tool_registry(&self) -> Arc<TokioMutex<ConcreteToolRegistry>> {
         self.tool_registry.clone()
     }
 
@@ -273,6 +288,28 @@ impl BamlRuntimeManager {
         self.tool_mapper
             .execute_from_baml_result(baml_result, &self.tool_registry)
             .await
+    }
+}
+
+// Implement traits for better abstraction
+#[async_trait]
+impl BamlFunctionExecutor for BamlRuntimeManager {
+    async fn execute_function(&self, function_name: &str, args: Value) -> Result<Value> {
+        self.invoke_function(function_name, args).await
+    }
+
+    fn list_functions(&self) -> Vec<String> {
+        self.function_registry.keys().cloned().collect()
+    }
+}
+
+impl SchemaLoader for BamlRuntimeManager {
+    fn load_schema(&mut self, schema_path: &str) -> Result<()> {
+        self.load_schema(schema_path)
+    }
+
+    fn is_schema_loaded(&self) -> bool {
+        self.is_schema_loaded()
     }
 }
 

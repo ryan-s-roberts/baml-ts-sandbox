@@ -12,6 +12,9 @@ pub mod js_value_converter;
 pub mod context;
 pub mod tools;
 pub mod tool_mapper;
+pub mod runtime;
+pub mod traits;
 
 pub use error::{BamlRtError, Result};
+pub use runtime::{Runtime, RuntimeBuilder, RuntimeConfig};
 
