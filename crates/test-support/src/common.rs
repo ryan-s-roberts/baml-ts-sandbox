@@ -1,0 +1,120 @@
+//! Common test utilities and shared modules.
+
+pub use crate::support::tools::*;
+mod test_tools;
+pub use test_tools::{WeatherTool, UppercaseTool, DelayedResponseTool};
+
+// Fixture helpers
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+use baml_rt::baml::BamlRuntimeManager;
+use baml_rt::quickjs_bridge::QuickJSBridge;
+
+pub fn fixture_path(relative_path: &str) -> PathBuf {
+    workspace_root()
+        .join("tests")
+        .join("fixtures")
+        .join(relative_path)
+}
+
+pub fn agent_fixture(name: &str) -> PathBuf {
+    fixture_path(&format!("agents/{}", name))
+}
+
+pub fn setup_baml_runtime(schema_path: &str) -> Arc<Mutex<BamlRuntimeManager>> {
+    let mut manager = BamlRuntimeManager::new().expect("Should create manager");
+    manager.load_schema(schema_path).expect("Should load schema");
+    Arc::new(Mutex::new(manager))
+}
+
+pub fn setup_baml_runtime_manager(schema_path: &str) -> BamlRuntimeManager {
+    let mut manager = BamlRuntimeManager::new().expect("Should create manager");
+    manager.load_schema(schema_path).expect("Should load schema");
+    manager
+}
+
+pub fn setup_baml_runtime_manager_default() -> BamlRuntimeManager {
+    setup_baml_runtime_manager(
+        workspace_root()
+            .join("baml_src")
+            .to_str()
+            .expect("Workspace baml_src path should be valid"),
+    )
+}
+
+pub fn setup_baml_runtime_default() -> Arc<Mutex<BamlRuntimeManager>> {
+    setup_baml_runtime(
+        workspace_root()
+            .join("baml_src")
+            .to_str()
+            .expect("Workspace baml_src path should be valid"),
+    )
+}
+
+pub fn setup_baml_runtime_from_fixture(fixture_name: &str) -> Arc<Mutex<BamlRuntimeManager>> {
+    let agent_dir = agent_fixture(fixture_name);
+    assert!(
+        agent_dir.join("baml_src").exists(),
+        "{} fixture must have baml_src directory",
+        fixture_name
+    );
+    setup_baml_runtime(agent_dir.to_str().expect("Fixture path should be valid"))
+}
+
+pub async fn setup_bridge(baml_manager: Arc<Mutex<BamlRuntimeManager>>) -> QuickJSBridge {
+    let mut bridge = QuickJSBridge::new(baml_manager).await.expect("Create QuickJS bridge");
+    bridge
+        .register_baml_functions()
+        .await
+        .expect("Register BAML functions");
+    bridge
+}
+
+pub fn require_api_key() -> String {
+    let _ = dotenvy::dotenv();
+    let api_key = std::env::var("OPENROUTER_API_KEY")
+        .expect("OPENROUTER_API_KEY environment variable must be set");
+    assert!(!api_key.is_empty(), "OPENROUTER_API_KEY must not be empty");
+    api_key
+}
+
+pub fn ensure_baml_src_exists() -> bool {
+    let baml_src = workspace_root().join("baml_src");
+    if !baml_src.exists() {
+        println!("Skipping test: baml_src directory not found");
+        return false;
+    }
+    true
+}
+
+pub fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|path| path.parent())
+        .expect("test-support crate should be under crates/")
+        .to_path_buf()
+}
+
+pub async fn assert_tool_registered_in_js(bridge: &mut QuickJSBridge, tool_name: &str) {
+    let js_code = format!(
+        r#"
+        (() => JSON.stringify({{
+            toolExists: typeof {} === 'function'
+        }}))()
+        "#,
+        tool_name
+    );
+    let result = bridge.evaluate(&js_code).await.expect("Should check tool registration");
+    let obj = result.as_object().expect("Expected object");
+    let tool_exists = obj
+        .get("toolExists")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    assert!(
+        tool_exists,
+        "Tool '{}' should be registered in QuickJS",
+        tool_name
+    );
+}

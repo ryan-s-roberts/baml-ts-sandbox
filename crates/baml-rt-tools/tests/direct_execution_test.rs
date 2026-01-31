@@ -1,0 +1,61 @@
+//! Integration tests for direct BAML tool execution (Rust + JS tools).
+
+use test_support::support;
+use baml_rt::A2aAgent;
+use serde_json::json;
+
+#[tokio::test]
+async fn test_direct_tool_execution_rust_and_js() {
+    let agent = A2aAgent::builder().build().await.expect("agent build");
+
+    {
+        let runtime = agent.runtime();
+        let mut runtime = runtime.lock().await;
+        runtime
+            .register_tool(support::tools::CalculatorTool)
+            .await
+            .expect("register rust tool");
+    }
+
+    let rust_result = {
+        let runtime = agent.runtime();
+        let runtime = runtime.lock().await;
+        runtime
+            .execute_tool("calculate", json!({"expression": {"left": 6, "operation": "Multiply", "right": 7}}))
+            .await
+            .expect("execute rust tool")
+    };
+
+    assert_eq!(
+        rust_result.get("result").and_then(|v| v.as_f64()),
+        Some(42.0)
+    );
+
+    agent
+        .register_js_tool(
+            "add_js",
+            "Adds two numbers",
+            json!({
+                "type": "object",
+                "properties": {
+                    "a": {"type": "number"},
+                    "b": {"type": "number"}
+                },
+                "required": ["a", "b"]
+            }),
+            r#"(args) => ({ sum: args.a + args.b })"#,
+        )
+        .await
+        .expect("register js tool");
+
+    let js_result = {
+        let runtime = agent.runtime();
+        let runtime = runtime.lock().await;
+        runtime
+            .execute_tool("add_js", json!({"a": 10, "b": 5}))
+            .await
+            .expect("execute js tool")
+    };
+
+    assert_eq!(js_result.get("sum").and_then(|v| v.as_i64()), Some(15));
+}

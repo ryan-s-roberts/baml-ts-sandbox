@@ -1,0 +1,18 @@
+[package]
+name = "baml-rt-core"
+version = { workspace = true }
+edition = { workspace = true }
+authors = { workspace = true }
+
+[dependencies]
+baml-runtime = { workspace = true }
+baml-types = { workspace = true }
+internal-baml-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+regex = { workspace = true }
+tracing = { workspace = true }

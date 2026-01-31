@@ -5,9 +5,7 @@ This directory contains test fixtures used by the test suite.
 ## Structure
 
 - `agents/` - Complete test agent applications
-  - `minimal-agent/` - Minimal agent for basic tests
-  - `tool-agent/` - Agent with tool calling (TODO)
-  - `complex-agent/` - Complex agent with multiple functions (TODO)
+  - `voidship-rites/` - Grimdark hybrid A2A + streaming fixture
 
 - `baml/` - BAML schema fixtures
   - `simple_prompt.baml` - Simple greeting function
@@ -26,7 +24,7 @@ Use the fixture helpers in `tests/support/fixtures.rs`:
 use tests::support::*;
 
 let baml_path = baml_fixture("simple_prompt.baml");
-let agent_path = agent_fixture("minimal-agent");
+let agent_path = agent_fixture("voidship-rites");
 ```
 
 ## Adding New Fixtures
@@ -34,4 +32,6 @@ let agent_path = agent_fixture("minimal-agent");
 1. Place BAML files in `baml/`
 2. Place agent applications in `agents/{name}/`
 3. Update this README if adding new categories
+
+
 

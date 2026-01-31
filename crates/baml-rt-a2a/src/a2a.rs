@@ -1,0 +1,777 @@
+//! Minimal A2A JSON-RPC request/response helpers.
+//!
+//! This provides a thin adapter layer without adding external dependencies.
+
+use crate::a2a_types::{
+    JSONRPCError, JSONRPCErrorResponse, JSONRPCId, JSONRPCRequest, JSONRPCSuccessResponse,
+    Message, SendMessageRequest,
+};
+use baml_rt_core::{BamlRtError, Result};
+use serde_json::{json, Map, Value};
+
+const JSONRPC_VERSION: &str = "2.0";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum A2aMethod {
+    MessageSend,
+    MessageSendStream,
+    TasksGet,
+    TasksList,
+    TasksCancel,
+    TasksSubscribe,
+}
+
+impl A2aMethod {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            A2aMethod::MessageSend => "message.send",
+            A2aMethod::MessageSendStream => "message.sendStream",
+            A2aMethod::TasksGet => "tasks.get",
+            A2aMethod::TasksList => "tasks.list",
+            A2aMethod::TasksCancel => "tasks.cancel",
+            A2aMethod::TasksSubscribe => "tasks.subscribe",
+        }
+    }
+}
+
+impl std::str::FromStr for A2aMethod {
+    type Err = BamlRtError;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "message.send" => Ok(A2aMethod::MessageSend),
+            "message.sendStream" => Ok(A2aMethod::MessageSendStream),
+            "tasks.get" => Ok(A2aMethod::TasksGet),
+            "tasks.list" => Ok(A2aMethod::TasksList),
+            "tasks.cancel" => Ok(A2aMethod::TasksCancel),
+            "tasks.subscribe" => Ok(A2aMethod::TasksSubscribe),
+            _ => Err(BamlRtError::InvalidArgument(
+                "Unsupported A2A request method".to_string(),
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct A2aRequest {
+    pub id: Option<JSONRPCId>,
+    pub method: A2aMethod,
+    pub params: Value,
+    pub is_stream: bool,
+}
+
+impl A2aRequest {
+    pub fn from_value(value: Value) -> Result<Self> {
+        let request: JSONRPCRequest = serde_json::from_value(value).map_err(BamlRtError::Json)?;
+        if request.jsonrpc != JSONRPC_VERSION {
+            return Err(BamlRtError::InvalidArgument(format!(
+                "Unsupported jsonrpc version: {}",
+                request.jsonrpc
+            )));
+        }
+
+        let id = request.id;
+        let method: A2aMethod = request.method.parse()?;
+        let mut params_value = request.params.unwrap_or(Value::Null);
+        let is_stream = match method {
+            A2aMethod::MessageSend => {
+                let params: SendMessageRequest =
+                    serde_json::from_value(params_value.clone()).map_err(BamlRtError::Json)?;
+                params_value = augment_message_params(params_value, &params.message);
+                stream_from_message_request(&params, &params_value)
+            }
+            A2aMethod::MessageSendStream => {
+                let params: SendMessageRequest =
+                    serde_json::from_value(params_value.clone()).map_err(BamlRtError::Json)?;
+                params_value = augment_message_params(params_value, &params.message);
+                true
+            }
+            A2aMethod::TasksGet
+            | A2aMethod::TasksList
+            | A2aMethod::TasksCancel
+            | A2aMethod::TasksSubscribe => {
+                params_value
+                    .get("stream")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                    && method == A2aMethod::TasksSubscribe
+            }
+        };
+
+        params_value = normalize_params(params_value);
+        if let Value::Object(mut map) = params_value {
+            map.remove("stream");
+            params_value = Value::Object(map);
+        }
+
+        Ok(Self {
+            id,
+            method,
+            params: params_value,
+            is_stream,
+        })
+    }
+
+    pub fn correlation_id(&self) -> Option<String> {
+        self.id.as_ref().map(id_to_string)
+    }
+}
+
+#[derive(Debug)]
+pub enum A2aOutcome {
+    Response(Value),
+    Stream(Vec<Value>),
+}
+
+pub fn success_response(id: Option<JSONRPCId>, result: Value) -> Value {
+    serde_json::to_value(JSONRPCSuccessResponse {
+        jsonrpc: JSONRPC_VERSION.to_string(),
+        result,
+        id,
+    })
+    .unwrap_or_else(|_| json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": null,
+        "result": { "error": "serialization failed" }
+    }))
+}
+
+pub fn error_response(id: Option<JSONRPCId>, code: i64, message: &str, data: Option<Value>) -> Value {
+    let error = JSONRPCError {
+        code: code as i32,
+        message: message.to_string(),
+        data,
+    };
+    serde_json::to_value(JSONRPCErrorResponse {
+        jsonrpc: JSONRPC_VERSION.to_string(),
+        error,
+        id,
+    })
+    .unwrap_or_else(|_| json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": null,
+        "error": { "code": -32603, "message": "serialization failed" }
+    }))
+}
+
+pub fn stream_chunk_response(
+    id: Option<JSONRPCId>,
+    chunk: Value,
+    index: usize,
+    is_final: bool,
+) -> Value {
+    serde_json::to_value(JSONRPCSuccessResponse {
+        jsonrpc: JSONRPC_VERSION.to_string(),
+        result: json!({
+            "stream": true,
+            "index": index,
+            "final": is_final,
+            "chunk": chunk,
+        }),
+        id,
+    })
+    .unwrap_or_else(|_| json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": null,
+        "result": { "error": "serialization failed" }
+    }))
+}
+
+fn normalize_params(value: Value) -> Value {
+    match value {
+        Value::Null => Value::Object(Map::new()),
+        Value::Object(map) => Value::Object(map),
+        Value::Array(items) => {
+            let mut map = Map::new();
+            for (idx, item) in items.into_iter().enumerate() {
+                map.insert(format!("arg{}", idx), item);
+            }
+            Value::Object(map)
+        }
+        other => {
+            let mut map = Map::new();
+            map.insert("value".to_string(), other);
+            Value::Object(map)
+        }
+    }
+}
+
+fn id_to_string(value: &JSONRPCId) -> String {
+    match value {
+        JSONRPCId::String(s) => s.clone(),
+        JSONRPCId::Integer(n) => n.to_string(),
+        JSONRPCId::Null => "null".to_string(),
+    }
+}
+
+pub fn extract_jsonrpc_id(value: &Value) -> Option<JSONRPCId> {
+    serde_json::from_value::<JSONRPCRequest>(value.clone())
+        .ok()
+        .and_then(|request| request.id)
+}
+
+pub fn extract_agent_name(value: &Value) -> Option<String> {
+    let request: JSONRPCRequest = serde_json::from_value(value.clone()).ok()?;
+    let Ok(method) = request.method.parse::<A2aMethod>() else {
+        return None;
+    };
+    if method != A2aMethod::MessageSend && method != A2aMethod::MessageSendStream {
+        return None;
+    }
+    let params: SendMessageRequest = serde_json::from_value(request.params?).ok()?;
+    metadata_value_as_string(params.metadata.as_ref(), "agent")
+        .or_else(|| metadata_value_as_string(params.metadata.as_ref(), "agent_name"))
+        .or_else(|| metadata_value_as_string(params.message.metadata.as_ref(), "agent"))
+        .or_else(|| metadata_value_as_string(params.message.metadata.as_ref(), "agent_name"))
+}
+
+fn metadata_value_as_string(
+    metadata: Option<&std::collections::HashMap<String, Value>>,
+    key: &str,
+) -> Option<String> {
+    metadata
+        .and_then(|meta| meta.get(key))
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string())
+}
+
+fn metadata_value_as_bool(
+    metadata: Option<&std::collections::HashMap<String, Value>>,
+    key: &str,
+) -> Option<bool> {
+    metadata
+        .and_then(|meta| meta.get(key))
+        .and_then(|value| value.as_bool())
+}
+
+fn augment_message_params(mut params_value: Value, message: &Message) -> Value {
+    let message_text = message_text(message);
+    if let Value::Object(ref mut map) = params_value
+        && let Some(text) = message_text
+    {
+        map.entry("text".to_string())
+            .or_insert(Value::String(text));
+    }
+    params_value
+}
+
+fn message_text(message: &Message) -> Option<String> {
+    let mut parts = Vec::new();
+    for part in &message.parts {
+        if let Some(text) = part.text.as_deref() {
+            parts.push(text);
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n"))
+    }
+}
+
+fn stream_from_message_request(params: &SendMessageRequest, params_value: &Value) -> bool {
+    params_value
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || metadata_value_as_bool(params.metadata.as_ref(), "stream").unwrap_or(false)
+        || metadata_value_as_bool(params.message.metadata.as_ref(), "stream").unwrap_or(false)
+}
+
+pub fn request_to_js_value(request: &A2aRequest) -> Value {
+    json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": request.id.as_ref().map(id_to_value).unwrap_or(Value::Null),
+        "method": request.method.as_str(),
+        "params": request.params,
+    })
+}
+
+fn id_to_value(value: &JSONRPCId) -> Value {
+    match value {
+        JSONRPCId::String(s) => Value::String(s.clone()),
+        JSONRPCId::Integer(n) => Value::Number((*n).into()),
+        JSONRPCId::Null => Value::Null,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::A2aRequest;
+    use crate::a2a_types::{JSONRPCId, JSONRPCRequest, Message, MessageRole, Part, SendMessageRequest, ROLE_USER};
+    use baml_rt_core::BamlRtError;
+    use crate::{A2aAgent, A2aRequestHandler};
+    use opentelemetry::global;
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_sdk::testing::trace::InMemorySpanExporterBuilder;
+    use opentelemetry_sdk::trace::TracerProvider;
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    struct OtelTestFixture {
+        exporter: opentelemetry_sdk::testing::trace::InMemorySpanExporter,
+        provider: TracerProvider,
+        _guard: tracing::subscriber::DefaultGuard,
+    }
+
+    impl OtelTestFixture {
+        fn new() -> Self {
+            let exporter = InMemorySpanExporterBuilder::new().build();
+            let provider = TracerProvider::builder()
+                .with_simple_exporter(exporter.clone())
+                .build();
+
+            global::set_tracer_provider(provider.clone());
+            let tracer = provider.tracer("baml_rt_test");
+            let subscriber = tracing_subscriber::registry()
+                .with(tracing_opentelemetry::layer().with_tracer(tracer));
+            let guard = tracing::subscriber::set_default(subscriber);
+
+            Self {
+                exporter,
+                provider,
+                _guard: guard,
+            }
+        }
+
+        fn spans(&self) -> Vec<opentelemetry_sdk::export::trace::SpanData> {
+            let _ = self.provider.force_flush();
+            self.exporter.get_finished_spans().unwrap_or_default()
+        }
+    }
+
+    fn find_span<'a>(
+        spans: &'a [opentelemetry_sdk::export::trace::SpanData],
+        name: &str,
+    ) -> Option<&'a opentelemetry_sdk::export::trace::SpanData> {
+        spans.iter().find(|span| span.name.as_ref() == name)
+    }
+
+    fn attr_value(
+        span: &opentelemetry_sdk::export::trace::SpanData,
+        key: &str,
+    ) -> Option<String> {
+        span.attributes
+            .iter()
+            .find(|kv| kv.key.as_str() == key)
+            .and_then(|kv| match &kv.value {
+                opentelemetry::Value::String(value) => Some(value.to_string()),
+                opentelemetry::Value::Bool(value) => Some(value.to_string()),
+                opentelemetry::Value::I64(value) => Some(value.to_string()),
+                opentelemetry::Value::F64(value) => Some(value.to_string()),
+                _ => None,
+            })
+    }
+
+    async fn setup_agent_with_js() -> A2aAgent {
+        let js_code = r#"
+            globalThis.handle_a2a_request = async function(request) {
+                const method = request && request.method;
+                const params = request && request.params ? request.params : {};
+                if (method === "message.send") {
+                    const text = params.text || (params.message && params.message.parts && params.message.parts[0] && params.message.parts[0].text) || "unknown";
+                    if (text === "task") {
+                        return {
+                            task: {
+                                id: "task-1",
+                                contextId: "ctx-1",
+                                status: { state: "TASK_STATE_WORKING" },
+                                history: []
+                            }
+                        };
+                    }
+                    return {
+                        message: {
+                            messageId: "resp-1",
+                            role: "ROLE_AGENT",
+                            parts: [{ text: `hi ${text}` }]
+                        }
+                    };
+                }
+                if (method === "message.sendStream") {
+                    const text = params.text || "friend";
+                    return [
+                        {
+                            message: {
+                                messageId: "resp-1",
+                                role: "ROLE_AGENT",
+                                parts: [{ text: `hello ${text}` }]
+                            }
+                        },
+                        {
+                            message: {
+                                messageId: "resp-2",
+                                role: "ROLE_AGENT",
+                                parts: [{ text: "done" }]
+                            }
+                        }
+                    ];
+                }
+                return {
+                    message: {
+                        messageId: "resp-unknown",
+                        role: "ROLE_AGENT",
+                        parts: [{ text: "unknown" }]
+                    }
+                };
+            };
+        "#;
+        A2aAgent::builder()
+            .with_init_js(js_code)
+            .build()
+            .await
+            .expect("agent build")
+    }
+
+    fn expect_success_result(responses: Vec<Value>) -> Value {
+        let response = responses.into_iter().next().expect("response");
+        if let Some(error) = response.get("error") {
+            panic!("unexpected error response: {error}");
+        }
+        response
+            .get("result")
+            .cloned()
+            .expect("missing result")
+    }
+
+    fn user_message(message_id: &str, text: &str) -> Message {
+        Message {
+            message_id: message_id.to_string(),
+            role: MessageRole::String(ROLE_USER.to_string()),
+            parts: vec![Part {
+                text: Some(text.to_string()),
+                ..Part::default()
+            }],
+            context_id: None,
+            task_id: None,
+            reference_task_ids: Vec::new(),
+            extensions: Vec::new(),
+            metadata: None,
+            extra: HashMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_a2a_jsonrpc_request_invokes_js_function() {
+        let agent = setup_agent_with_js().await;
+
+        let params = SendMessageRequest {
+            message: user_message("msg-1", "Ada"),
+            configuration: None,
+            metadata: None,
+            tenant: None,
+            extra: HashMap::new(),
+        };
+        let request = JSONRPCRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "message.send".to_string(),
+            params: Some(serde_json::to_value(params).expect("serialize params")),
+            id: Some(JSONRPCId::String("req-1".to_string())),
+        };
+        let request_value = serde_json::to_value(request).expect("serialize request");
+
+        let responses = agent
+            .handle_a2a(request_value)
+            .await
+            .expect("a2a handle");
+        let result = expect_success_result(responses);
+        let message = result
+            .get("message")
+            .and_then(Value::as_object)
+            .expect("response message");
+        let parts = message
+            .get("parts")
+            .and_then(Value::as_array)
+            .expect("message parts");
+        let text = parts
+            .first()
+            .and_then(|part| part.get("text"))
+            .and_then(Value::as_str);
+        assert_eq!(text, Some("hi Ada"));
+    }
+
+    #[tokio::test]
+    async fn test_a2a_request_span_structure() {
+        let _otel = OtelTestFixture::new();
+        let agent = setup_agent_with_js().await;
+
+        let params = SendMessageRequest {
+            message: user_message("msg-span", "Ada"),
+            configuration: None,
+            metadata: None,
+            tenant: None,
+            extra: HashMap::new(),
+        };
+        let request = JSONRPCRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "message.send".to_string(),
+            params: Some(serde_json::to_value(params).expect("serialize params")),
+            id: Some(JSONRPCId::String("span-req".to_string())),
+        };
+        let request_value = serde_json::to_value(request).expect("serialize request");
+
+        let _ = agent.handle_a2a(request_value).await;
+
+        let spans = _otel.spans();
+        let span = find_span(&spans, "baml_rt.a2a_request")
+            .expect("expected baml_rt.a2a_request span");
+        assert_eq!(attr_value(span, "method").as_deref(), Some("message.send"));
+        assert_eq!(attr_value(span, "correlation_id").as_deref(), Some("span-req"));
+    }
+
+    #[tokio::test]
+    async fn test_a2a_stream_span_structure() {
+        let _otel = OtelTestFixture::new();
+        let agent = setup_agent_with_js().await;
+
+        let params = SendMessageRequest {
+            message: user_message("msg-stream-span", "Ada"),
+            configuration: None,
+            metadata: None,
+            tenant: None,
+            extra: HashMap::new(),
+        };
+        let request = JSONRPCRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "message.sendStream".to_string(),
+            params: Some(serde_json::to_value(params).expect("serialize params")),
+            id: Some(JSONRPCId::String("span-stream".to_string())),
+        };
+        let request_value = serde_json::to_value(request).expect("serialize request");
+
+        let _ = agent.handle_a2a(request_value).await;
+
+        let spans = _otel.spans();
+        let span = find_span(&spans, "baml_rt.a2a_stream")
+            .expect("expected baml_rt.a2a_stream span");
+        assert_eq!(attr_value(span, "method").as_deref(), Some("message.sendStream"));
+        assert_eq!(attr_value(span, "correlation_id").as_deref(), Some("span-stream"));
+    }
+
+    #[tokio::test]
+    async fn test_a2a_stream_suffix_dispatches_stream() {
+        let agent = setup_agent_with_js().await;
+
+        let params = SendMessageRequest {
+            message: user_message("msg-2", "Ada"),
+            configuration: None,
+            metadata: None,
+            tenant: None,
+            extra: HashMap::new(),
+        };
+        let request = JSONRPCRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "message.sendStream".to_string(),
+            params: Some(serde_json::to_value(params).expect("serialize params")),
+            id: Some(JSONRPCId::String("stream-1".to_string())),
+        };
+        let request_value = serde_json::to_value(request).expect("serialize request");
+
+        let responses = agent
+            .handle_a2a(request_value)
+            .await
+            .expect("a2a handle");
+        assert!(!responses.is_empty(), "stream should return chunks");
+        let any_final = responses.iter().any(|value| {
+            value
+                .get("result")
+                .and_then(|result| result.get("final"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        });
+        assert!(any_final, "stream should include a final chunk");
+    }
+
+    #[tokio::test]
+    async fn test_a2a_stream_param_dispatches_stream() {
+        let agent = setup_agent_with_js().await;
+
+        let params = SendMessageRequest {
+            message: user_message("msg-3", "Ada"),
+            configuration: None,
+            metadata: None,
+            tenant: None,
+            extra: HashMap::new(),
+        };
+        let mut params_value = serde_json::to_value(params).expect("serialize params");
+        if let Value::Object(ref mut map) = params_value {
+            map.insert("stream".to_string(), Value::Bool(true));
+        }
+        let request = JSONRPCRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "message.send".to_string(),
+            params: Some(params_value),
+            id: Some(JSONRPCId::String("stream-2".to_string())),
+        };
+        let request_value = serde_json::to_value(request).expect("serialize request");
+
+        let responses = agent
+            .handle_a2a(request_value)
+            .await
+            .expect("a2a handle");
+        assert!(!responses.is_empty(), "stream should return chunks");
+        let any_final = responses.iter().any(|value| {
+            value
+                .get("result")
+                .and_then(|result| result.get("final"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        });
+        assert!(any_final, "stream should include a final chunk");
+    }
+
+    #[tokio::test]
+    async fn test_tasks_get_list_cancel() {
+        let agent = setup_agent_with_js().await;
+
+        let params = SendMessageRequest {
+            message: user_message("msg-task", "task"),
+            configuration: None,
+            metadata: None,
+            tenant: None,
+            extra: HashMap::new(),
+        };
+        let create_request = JSONRPCRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "message.send".to_string(),
+            params: Some(serde_json::to_value(params).expect("serialize params")),
+            id: Some(JSONRPCId::String("task-create".to_string())),
+        };
+        let create_value = serde_json::to_value(create_request).expect("serialize request");
+        let create_responses = agent.handle_a2a(create_value).await.expect("create task");
+        let task_id = create_responses
+            .iter()
+            .find_map(|response| {
+                response
+                    .get("result")
+                    .and_then(|result| result.get("task"))
+                    .and_then(|task| task.get("id"))
+                    .and_then(Value::as_str)
+            })
+            .expect("task id");
+
+        let get_request = JSONRPCRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tasks.get".to_string(),
+            params: Some(json!({ "id": task_id })),
+            id: Some(JSONRPCId::String("task-get".to_string())),
+        };
+        let responses = agent
+            .handle_a2a(serde_json::to_value(get_request).expect("serialize request"))
+            .await
+            .expect("get task");
+        let result = expect_success_result(responses);
+        assert_eq!(result.get("id").and_then(Value::as_str), Some(task_id));
+
+        let list_request = JSONRPCRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tasks.list".to_string(),
+            params: Some(json!({})),
+            id: Some(JSONRPCId::String("task-list".to_string())),
+        };
+        let responses = agent
+            .handle_a2a(serde_json::to_value(list_request).expect("serialize request"))
+            .await
+            .expect("list tasks");
+        let result = expect_success_result(responses);
+        let tasks = result
+            .get("tasks")
+            .and_then(Value::as_array)
+            .expect("tasks list");
+        assert!(tasks.iter().any(|task| {
+            task.get("id").and_then(Value::as_str) == Some(task_id)
+        }));
+
+        let cancel_request = JSONRPCRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tasks.cancel".to_string(),
+            params: Some(json!({ "id": task_id })),
+            id: Some(JSONRPCId::String("task-cancel".to_string())),
+        };
+        let responses = agent
+            .handle_a2a(serde_json::to_value(cancel_request).expect("serialize request"))
+            .await
+            .expect("cancel task");
+        let result = expect_success_result(responses);
+        let state = result
+            .get("status")
+            .and_then(Value::as_object)
+            .and_then(|status| status.get("state"))
+            .and_then(Value::as_str);
+        assert_eq!(state, Some("TASK_STATE_CANCELED"));
+    }
+
+    #[tokio::test]
+    async fn test_tasks_subscribe_stream() {
+        let agent = setup_agent_with_js().await;
+
+        let params = SendMessageRequest {
+            message: user_message("msg-task-stream", "task"),
+            configuration: None,
+            metadata: None,
+            tenant: None,
+            extra: HashMap::new(),
+        };
+        let create_request = JSONRPCRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "message.send".to_string(),
+            params: Some(serde_json::to_value(params).expect("serialize params")),
+            id: Some(JSONRPCId::String("task-create-stream".to_string())),
+        };
+        let create_value = serde_json::to_value(create_request).expect("serialize request");
+        let create_responses = agent.handle_a2a(create_value).await.expect("create task");
+        let task_id = create_responses
+            .iter()
+            .find_map(|response| {
+                response
+                    .get("result")
+                    .and_then(|result| result.get("task"))
+                    .and_then(|task| task.get("id"))
+                    .and_then(Value::as_str)
+            })
+            .expect("task id");
+
+        let subscribe_request = JSONRPCRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tasks.subscribe".to_string(),
+            params: Some(json!({ "id": task_id, "stream": true })),
+            id: Some(JSONRPCId::String("task-subscribe".to_string())),
+        };
+        let responses = agent
+            .handle_a2a(serde_json::to_value(subscribe_request).expect("serialize request"))
+            .await
+            .expect("subscribe task");
+        assert!(!responses.is_empty(), "subscribe should return a stream response");
+        let any_final = responses.iter().any(|value| {
+            value
+                .get("result")
+                .and_then(|result| result.get("final"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        });
+        assert!(any_final, "subscribe stream should include a final chunk");
+    }
+
+    #[test]
+    fn test_a2a_jsonrpc_version_validation() {
+        let request = json!({
+            "jsonrpc": "1.0",
+            "id": "bad-1",
+            "method": "message.send",
+            "params": {
+                "message": {
+                    "messageId": "msg-4",
+                    "role": "ROLE_USER",
+                    "parts": [{ "text": "Ada" }]
+                }
+            }
+        });
+
+        let err = A2aRequest::from_value(request).expect_err("should reject bad version");
+        match err {
+            BamlRtError::InvalidArgument(_) | BamlRtError::Json(_) => {}
+            other => panic!("unexpected error: {}", other),
+        }
+    }
+}

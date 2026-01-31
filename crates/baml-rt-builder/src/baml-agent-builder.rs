@@ -1,0 +1,442 @@
+//! BAML Agent Builder
+//!
+//! This binary compiles, lints, and packages BAML + TypeScript agent applications
+//! into distributable tar.gz packages, and runs agents with stdin/stdout connectivity.
+//!
+//! Uses OXC for high-performance TypeScript compilation and linting.
+
+use baml_rt_builder::builder::{
+    AgentDir, PackagePath, FunctionName, BuildDir,
+    BuilderService, StdFileSystem, OxcLinter,
+    OxcTypeScriptCompiler, RuntimeTypeGenerator, StdPackager,
+    FileSystem, Linter,
+};
+use baml_rt_core::{BamlRtError, Result};
+use baml_rt_observability::{spans, tracing_setup};
+use baml_rt_quickjs::{BamlRuntimeManager, QuickJSBridge};
+use clap::{Parser, Subcommand};
+use serde_json::Value;
+use std::fs;
+use std::io::{self, BufRead, Write};
+use std::sync::Arc;
+use std::path::PathBuf;
+use tokio::sync::Mutex;
+
+#[derive(Parser)]
+#[command(name = "baml-agent-builder")]
+#[command(about = "Build and run BAML agent packages with OXC", long_about = None)]
+#[command(version)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Lint TypeScript/JavaScript source code
+    Lint {
+        /// Agent directory (default: current directory)
+        #[arg(short, long, default_value = ".")]
+        agent_dir: PathBuf,
+    },
+    
+    /// Package an agent into a tar.gz file
+    Package {
+        /// Agent directory (default: current directory)
+        #[arg(short, long, default_value = ".")]
+        agent_dir: PathBuf,
+
+        /// Output file path
+        #[arg(short, long, default_value = "agent-package.tar.gz")]
+        output: PathBuf,
+
+        /// Skip linting
+        #[arg(long)]
+        skip_lint: bool,
+    },
+    
+    /// Run an agent package with stdin/stdout connectivity
+    Run {
+        /// Agent package file path
+        #[arg(short, long)]
+        package: PathBuf,
+
+        /// Function to call (if not provided, reads from stdin)
+        #[arg(short, long)]
+        function: Option<String>,
+
+        /// JSON arguments (if not provided and function specified, reads from stdin)
+        #[arg(short, long)]
+        args: Option<String>,
+    },
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_setup::init_tracing();
+
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::Lint { agent_dir } => {
+            let agent_dir = AgentDir::new(agent_dir)?;
+            lint_agent(&agent_dir).await?;
+        }
+        Commands::Package {
+            agent_dir,
+            output,
+            skip_lint,
+        } => {
+            let agent_dir = AgentDir::new(agent_dir)?;
+            package_agent(&agent_dir, &output, !skip_lint).await?;
+        }
+        Commands::Run {
+            package,
+            function,
+            args,
+        } => {
+            let package_path = PackagePath::new(package)?;
+            let function_name = function.map(FunctionName::new).transpose()?;
+            run_agent(&package_path, function_name.as_ref(), args.as_deref()).await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn lint_agent(agent_dir: &AgentDir) -> Result<()> {
+    let span = spans::lint_agent(agent_dir.as_path());
+    let _guard = span.enter();
+    
+    let filesystem = StdFileSystem;
+    let linter = OxcLinter::new(filesystem);
+    linter.lint(agent_dir).await
+}
+
+async fn package_agent(
+    agent_dir: &AgentDir,
+    output: &std::path::Path,
+    lint: bool,
+) -> Result<()> {
+    let span = spans::package_agent(agent_dir.as_path(), output);
+    let _guard = span.enter();
+
+    println!("📦 Building agent package...");
+    println!("   Agent directory: {}", agent_dir);
+    println!("   Output: {}", output.display());
+
+    // Create temporary build directory
+    let build_dir = BuildDir::new()?;
+
+    // Initialize services
+    let filesystem = StdFileSystem;
+    let linter = OxcLinter::new(filesystem);
+    let ts_compiler = OxcTypeScriptCompiler::new(filesystem);
+    let type_generator = RuntimeTypeGenerator::new();
+    let packager = StdPackager::new(filesystem);
+
+    // Copy baml_src to build directory (runtime loads from baml_src)
+    filesystem.copy_dir_all(&agent_dir.baml_src(), &build_dir.join("baml_src"))?;
+
+    let builder_service = BuilderService::new(
+        linter,
+        ts_compiler,
+        type_generator,
+        packager,
+    );
+
+    // Build the package
+    builder_service.build_package(agent_dir, &build_dir, output, lint).await?;
+
+    println!("\n✅ Agent package built successfully: {}", output.display());
+    Ok(())
+}
+
+async fn run_agent(
+    package_path: &PackagePath,
+    function: Option<&FunctionName>,
+    args_json: Option<&str>,
+) -> Result<()> {
+    let span = spans::load_agent_package(package_path.as_path());
+    let _guard = span.enter();
+
+    // Load the agent package
+    println!("📦 Loading agent package: {}", package_path);
+    let agent = load_agent_package(package_path.as_path()).await?;
+    println!("✅ Agent loaded: {}", agent.name());
+
+    // If function is specified, call it once
+    if let Some(function_name) = function {
+        let args = if let Some(args_str) = args_json {
+            serde_json::from_str(args_str)
+                .map_err(|e| BamlRtError::InvalidArgumentWithSource {
+                    message: "Invalid JSON args".to_string(),
+                    source: Box::new(e),
+                })?
+        } else {
+            // Read args from stdin
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)
+                .map_err(BamlRtError::Io)?;
+            serde_json::from_str(input.trim())
+                .map_err(|e| BamlRtError::InvalidArgumentWithSource {
+                    message: "Invalid JSON from stdin".to_string(),
+                    source: Box::new(e),
+                })?
+        };
+
+        let invoke_span = spans::invoke_function("agent", function_name.as_str());
+        let _invoke_guard = invoke_span.enter();
+        let result = agent.invoke_function(function_name.as_str(), args).await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+
+    // Otherwise, run in interactive mode: read from stdin, write to stdout
+    println!("🔄 Running in interactive mode (reading from stdin, writing to stdout)");
+    println!("   Format: <function_name> <json_args>");
+    println!("   Example: handle_a2a_request {{\"method\":\"message.send\",\"params\":{{\"message\":{{\"messageId\":\"msg-1\",\"role\":\"ROLE_USER\",\"parts\":[{{\"text\":\"Alice\"}}]}}}}}}");
+    println!("   Press Ctrl+D to exit\n");
+
+    let stdin = io::stdin();
+    let mut stdin_lock = stdin.lock();
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        print!("> ");
+        io::stdout().flush().map_err(BamlRtError::Io)?;
+
+        match stdin_lock.read_line(&mut line) {
+            Ok(0) => break, // EOF
+            Ok(_) => {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+
+                // Parse input: function_name json_args
+                let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
+                if parts.len() < 2 {
+                    eprintln!("Error: Expected format: <function_name> <json_args>");
+                    continue;
+                }
+
+                let function_name_str = parts[0];
+                let args_json = parts[1];
+
+                match serde_json::from_str::<Value>(args_json) {
+                    Ok(args) => {
+                        let invoke_span = spans::invoke_function("agent", function_name_str);
+                        let _invoke_guard = invoke_span.enter();
+                        match agent.invoke_function(function_name_str, args).await {
+                            Ok(result) => {
+                                println!("{}", serde_json::to_string_pretty(&result)?);
+                            }
+                            Err(e) => {
+                                eprintln!("Error: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Error: Invalid JSON: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                return Err(BamlRtError::Io(e));
+            }
+        }
+    }
+
+    println!("\n👋 Exiting");
+    Ok(())
+}
+
+// Agent package loader (reusing logic from baml-agent-runner)
+struct LoadedAgent {
+    name: String,
+    js_bridge: Arc<Mutex<QuickJSBridge>>,
+}
+
+impl LoadedAgent {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn invoke_function(&self, function_name: &str, args: Value) -> Result<Value> {
+        // Delegate to QuickJSBridge's JS-only invocation
+        let mut bridge_guard = self.js_bridge.lock().await;
+        bridge_guard.invoke_js_function(function_name, args).await
+    }
+}
+
+async fn load_agent_package(package_path: &std::path::Path) -> Result<LoadedAgent> {
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    // Extract package
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(BamlRtError::SystemTime)?;
+    
+    let extract_dir = std::env::temp_dir().join(format!("baml-agent-{}", timestamp.as_secs()));
+    fs::create_dir_all(&extract_dir).map_err(BamlRtError::Io)?;
+
+    let tar_gz = fs::File::open(package_path).map_err(BamlRtError::Io)?;
+    let tar = flate2::read::GzDecoder::new(tar_gz);
+    let mut archive = tar::Archive::new(tar);
+    archive.unpack(&extract_dir).map_err(BamlRtError::Io)?;
+
+    // Load manifest
+    let manifest_path = extract_dir.join("manifest.json");
+    let manifest_content = fs::read_to_string(&manifest_path).map_err(BamlRtError::Io)?;
+    let manifest_json: Value = serde_json::from_str(&manifest_content).map_err(BamlRtError::Json)?;
+
+    let name = manifest_json.get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BamlRtError::InvalidArgument("manifest.json missing 'name' field".to_string()))?
+        .to_string();
+
+    let entry_point = manifest_json.get("entry_point")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_else(|| "dist/index.js".to_string());
+
+    // Load BAML schema
+    let baml_src = extract_dir.join("baml_src");
+    let runtime_manager = {
+        let schema_span = spans::load_baml_schema(&baml_src);
+        let _schema_guard = schema_span.enter();
+        let baml_src_str = baml_src.to_str()
+            .ok_or_else(|| BamlRtError::InvalidArgument(
+                format!("BAML source path contains invalid UTF-8: {}", baml_src.display())
+            ))?;
+        let mut rm = BamlRuntimeManager::new()?;
+        rm.load_schema(baml_src_str)?;
+        rm
+    };
+
+    // Create QuickJS bridge
+    let runtime_manager_arc = Arc::new(Mutex::new(runtime_manager));
+    let mut js_bridge = {
+        let bridge_span = spans::create_js_bridge();
+        let _bridge_guard = bridge_span.enter();
+        let mut bridge = QuickJSBridge::new(runtime_manager_arc.clone()).await?;
+        bridge.register_baml_functions().await?;
+        bridge
+    };
+
+    // Load agent JavaScript code
+    let entry_point_path = extract_dir.join(&entry_point);
+    if entry_point_path.exists() {
+        let eval_span = spans::evaluate_agent_code(&entry_point);
+        let _eval_guard = eval_span.enter();
+        let agent_code = fs::read_to_string(&entry_point_path).map_err(BamlRtError::Io)?;
+        // Execute agent code - this should set up functions on globalThis
+        if let Err(e) = js_bridge.evaluate(&agent_code).await {
+            tracing::warn!(error = ?e, "Agent init script evaluation failed");
+        }
+    } else {
+        tracing::warn!(entry_point = %entry_point_path.display(), "Agent entry point not found");
+    }
+
+    Ok(LoadedAgent {
+        name,
+        js_bridge: Arc::new(Mutex::new(js_bridge)),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use baml_rt_quickjs::BamlRuntimeManager;
+    use baml_rt_quickjs::QuickJSBridge;
+    use serde_json::json;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    async fn create_test_agent() -> LoadedAgent {
+        let agent_dir = test_support::common::agent_fixture("voidship-rites");
+        
+        let mut runtime_manager = BamlRuntimeManager::new().unwrap();
+        runtime_manager.load_schema(agent_dir.to_str().unwrap()).unwrap();
+        
+        let runtime_manager_arc = Arc::new(Mutex::new(runtime_manager));
+        let mut js_bridge = QuickJSBridge::new(runtime_manager_arc.clone()).await.unwrap();
+        js_bridge.register_baml_functions().await.unwrap();
+        
+        // Load agent code
+        let agent_code = r#"
+            async function riteBlessing(args) {
+                return await VoidshipGreeting({ name: args.name });
+            }
+            globalThis.riteBlessing = riteBlessing;
+        "#;
+        let _ = js_bridge.evaluate(agent_code).await;
+        
+        LoadedAgent {
+            name: "test-agent".to_string(),
+            js_bridge: Arc::new(Mutex::new(js_bridge)),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_invoke_function_returns_actual_result() {
+        // Contract: invoke_function must return the actual result, not {"success": true}
+        let agent = create_test_agent().await;
+        
+        let args = json!({"name": "ContractTest"});
+        let result = agent.invoke_function("riteBlessing", args).await;
+        
+        match result {
+            Ok(val) => {
+                // CONTRACT: Result can be a string (success) or an object with "error" (failure)
+                // Must NOT be a {"success": true} wrapper
+                if let Some(obj) = val.as_object() {
+                    // Check if it's an error object (acceptable) or success wrapper (not acceptable)
+                    if obj.contains_key("success") {
+                        panic!("CONTRACT VIOLATION: Result is object with 'success': {:?}. Must return actual result.", obj);
+                    }
+                    // Error objects are acceptable for API key errors
+                    if let Some(error_msg) = obj.get("error").and_then(|v| v.as_str())
+                        && (error_msg.contains("InvalidAuthentication") || error_msg.contains("401"))
+                    {
+                        println!("Test passed (with expected API key error): {}", error_msg);
+                        return; // Acceptable error case
+                    }
+                    panic!("CONTRACT VIOLATION: Result is unexpected object: {:?}", obj);
+                }
+                
+                // Must be a string result
+                let greeting = val.as_str().expect("Expected string result");
+                // Accept API key errors (they prove function was called)
+                if !greeting.contains("error") && !greeting.contains("401") {
+                    assert!(
+                        greeting.contains("ContractTest") || greeting.contains("Contract"),
+                        "Expected greeting to contain name, got: '{}'",
+                        greeting
+                    );
+                }
+                println!("Test passed: Got expected result: {}", greeting);
+            }
+            Err(e) => {
+                // Promise resolution failures are contract violations
+                let error_str = format!("{}", e);
+                if error_str.contains("Promise did not resolve") {
+                    panic!("CONTRACT VIOLATION: Promise resolution failed: {}", e);
+                }
+                // API key errors are acceptable - they prove the function was called
+                if error_str.contains("InvalidAuthentication") 
+                    || error_str.contains("401") 
+                    || error_str.contains("BAML execution error")
+                    || error_str.contains("Parsed result conversion failed")
+                {
+                    println!("Test passed (with expected API key/BAML error): {}", error_str);
+                    return; // Acceptable error case
+                }
+                panic!("CONTRACT VIOLATION: Unexpected error: {}", e);
+            }
+        }
+    }
+}

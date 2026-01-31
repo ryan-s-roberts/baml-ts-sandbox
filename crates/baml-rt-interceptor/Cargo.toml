@@ -1,0 +1,16 @@
+[package]
+name = "baml-rt-interceptor"
+version = { workspace = true }
+edition = { workspace = true }
+authors = { workspace = true }
+
+[dependencies]
+baml-rt-core = { path = "../baml-rt-core" }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+test-support = { path = "../test-support" }
+baml-rt = { path = "../baml-rt" }
+tokio = { workspace = true }

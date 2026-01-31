@@ -1,0 +1,7 @@
+{
+  "version": "1.0.0",
+  "name": "voidship-rites",
+  "description": "Grimdark voidship rite-keeper fixture agent",
+  "entry_point": "dist/index.js",
+  "runtime_version": "0.1.0"
+}

@@ -1,7 +1,0 @@
-{
-  "name": "tool-agent",
-  "version": "1.0.0",
-  "entry_point": "dist/index.js",
-  "description": "Test agent with tool calling support"
-}
-
