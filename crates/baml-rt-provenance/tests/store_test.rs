@@ -66,6 +66,7 @@ async fn test_in_memory_store_adds_events() {
             }
         ],
         "was_generated_by": [],
+        "qualified_generation": [],
         "was_associated_with": [],
         "was_derived_from": [],
         "a2a_relations": [
@@ -138,7 +139,16 @@ fn snapshot_value(normalized: &baml_rt_provenance::NormalizedProv) -> Value {
     let mut was_generated_by = Vec::new();
     for (_, rel) in normalized.document.was_generated_by() {
         was_generated_by.push(json!({
-            "entity": rel.entity.as_str(),
+            "entity": rel.entity.id(),
+            "activity": rel.activity.as_str(),
+            "time_ms": rel.time_ms
+        }));
+    }
+
+    let mut qualified_generation = Vec::new();
+    for (_, rel) in normalized.document.qualified_generation() {
+        qualified_generation.push(json!({
+            "entity": rel.entity.id(),
             "activity": rel.activity.as_str(),
             "time_ms": rel.time_ms
         }));
@@ -180,6 +190,7 @@ fn snapshot_value(normalized: &baml_rt_provenance::NormalizedProv) -> Value {
         "agents": agents,
         "used": used,
         "was_generated_by": was_generated_by,
+        "qualified_generation": qualified_generation,
         "was_associated_with": was_associated_with,
         "was_derived_from": was_derived_from,
         "a2a_relations": a2a_relations

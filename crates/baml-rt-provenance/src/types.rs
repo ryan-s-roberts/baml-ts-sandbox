@@ -105,7 +105,7 @@ pub struct Agent {
     pub attributes: HashMap<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ProvNodeRef {
     Entity(ProvEntityId),
     Activity(ProvActivityId),
@@ -127,6 +127,18 @@ impl ProvNodeRef {
             ProvNodeRef::Activity(id) => id.as_str(),
             ProvNodeRef::Agent(id) => id.as_str(),
         }
+    }
+}
+
+impl From<ProvEntityId> for ProvNodeRef {
+    fn from(value: ProvEntityId) -> Self {
+        ProvNodeRef::Entity(value)
+    }
+}
+
+impl From<ProvAgentId> for ProvNodeRef {
+    fn from(value: ProvAgentId) -> Self {
+        ProvNodeRef::Agent(value)
     }
 }
 
@@ -153,7 +165,17 @@ pub struct WasAssociatedWith {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WasGeneratedBy {
     #[serde(rename = "prov:entity")]
-    pub entity: ProvEntityId,
+    pub entity: ProvNodeRef,
+    #[serde(rename = "prov:activity")]
+    pub activity: ProvActivityId,
+    #[serde(rename = "prov:time", skip_serializing_if = "Option::is_none")]
+    pub time_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct QualifiedGeneration {
+    #[serde(rename = "prov:entity")]
+    pub entity: ProvNodeRef,
     #[serde(rename = "prov:activity")]
     pub activity: ProvActivityId,
     #[serde(rename = "prov:time", skip_serializing_if = "Option::is_none")]

@@ -85,6 +85,7 @@ pub mod base_types {
 pub mod prov_relations {
     pub const USED: &str = "USED";
     pub const WAS_GENERATED_BY: &str = "WAS_GENERATED_BY";
+    pub const QUALIFIED_GENERATION: &str = "QUALIFIED_GENERATION";
     pub const WAS_ASSOCIATED_WITH: &str = "WAS_ASSOCIATED_WITH";
     pub const WAS_DERIVED_FROM: &str = "WAS_DERIVED_FROM";
 }

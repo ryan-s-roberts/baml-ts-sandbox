@@ -1,6 +1,6 @@
 use crate::types::{
-    Activity, Agent, Entity, ProvActivityId, ProvAgentId, ProvEntityId, Used, WasAssociatedWith,
-    WasDerivedFrom, WasGeneratedBy,
+    Activity, Agent, Entity, ProvActivityId, ProvAgentId, ProvEntityId, QualifiedGeneration, Used,
+    WasAssociatedWith, WasDerivedFrom, WasGeneratedBy,
 };
 use std::collections::HashMap;
 
@@ -11,6 +11,7 @@ pub struct ProvDocument {
     agent: HashMap<ProvAgentId, Agent>,
     used: HashMap<String, Used>,
     was_generated_by: HashMap<String, WasGeneratedBy>,
+    qualified_generation: HashMap<String, QualifiedGeneration>,
     was_associated_with: HashMap<String, WasAssociatedWith>,
     was_derived_from: HashMap<String, WasDerivedFrom>,
     blank_node_counter: u64,
@@ -41,6 +42,10 @@ impl ProvDocument {
         self.was_generated_by.insert(id, rel);
     }
 
+    pub fn insert_qualified_generation(&mut self, id: String, rel: QualifiedGeneration) {
+        self.qualified_generation.insert(id, rel);
+    }
+
     pub fn insert_was_associated_with(&mut self, id: String, rel: WasAssociatedWith) {
         self.was_associated_with.insert(id, rel);
     }
@@ -67,6 +72,10 @@ impl ProvDocument {
 
     pub fn was_generated_by(&self) -> impl Iterator<Item = (&String, &WasGeneratedBy)> {
         self.was_generated_by.iter()
+    }
+
+    pub fn qualified_generation(&self) -> impl Iterator<Item = (&String, &QualifiedGeneration)> {
+        self.qualified_generation.iter()
     }
 
     pub fn was_associated_with(&self) -> impl Iterator<Item = (&String, &WasAssociatedWith)> {

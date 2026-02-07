@@ -1,8 +1,8 @@
 use crate::{
     document::ProvDocument,
     types::{
-        Activity, Agent, Entity, ProvActivityId, ProvAgentId, ProvEntityId, Used,
-        WasAssociatedWith, WasDerivedFrom, WasGeneratedBy,
+        Activity, Agent, Entity, ProvActivityId, ProvAgentId, ProvEntityId, ProvNodeRef,
+        QualifiedGeneration, Used, WasAssociatedWith, WasDerivedFrom, WasGeneratedBy,
     },
 };
 use std::collections::HashMap;
@@ -151,8 +151,20 @@ impl ProvDocumentBuilder {
         UsedBuilder::new(self, activity.into(), entity.into())
     }
 
-    pub fn was_generated_by(self, entity: impl Into<ProvEntityId>, activity: impl Into<ProvActivityId>) -> WasGeneratedByBuilder {
+    pub fn was_generated_by(
+        self,
+        entity: impl Into<ProvNodeRef>,
+        activity: impl Into<ProvActivityId>,
+    ) -> WasGeneratedByBuilder {
         WasGeneratedByBuilder::new(self, entity.into(), activity.into())
+    }
+
+    pub fn qualified_generation(
+        self,
+        entity: impl Into<ProvNodeRef>,
+        activity: impl Into<ProvActivityId>,
+    ) -> QualifiedGenerationBuilder {
+        QualifiedGenerationBuilder::new(self, entity.into(), activity.into())
     }
 
     pub fn was_associated_with(self, activity: impl Into<ProvActivityId>, agent: impl Into<ProvAgentId>) -> WasAssociatedWithBuilder {
@@ -195,7 +207,14 @@ impl UsedBuilder {
 
 pub struct WasGeneratedByBuilder {
     doc_builder: ProvDocumentBuilder,
-    entity: ProvEntityId,
+    entity: ProvNodeRef,
+    activity: ProvActivityId,
+    time_ms: Option<u64>,
+}
+
+pub struct QualifiedGenerationBuilder {
+    doc_builder: ProvDocumentBuilder,
+    entity: ProvNodeRef,
     activity: ProvActivityId,
     time_ms: Option<u64>,
 }
@@ -227,7 +246,7 @@ impl WasAssociatedWithBuilder {
 }
 
 impl WasGeneratedByBuilder {
-    fn new(doc_builder: ProvDocumentBuilder, entity: ProvEntityId, activity: ProvActivityId) -> Self {
+    fn new(doc_builder: ProvDocumentBuilder, entity: ProvNodeRef, activity: ProvActivityId) -> Self {
         Self { doc_builder, entity, activity, time_ms: None }
     }
 
@@ -241,6 +260,28 @@ impl WasGeneratedByBuilder {
         let was_generated_by =
             WasGeneratedBy { entity: self.entity, activity: self.activity, time_ms: self.time_ms };
         self.doc_builder.doc.insert_was_generated_by(id, was_generated_by);
+        self.doc_builder
+    }
+}
+
+impl QualifiedGenerationBuilder {
+    fn new(doc_builder: ProvDocumentBuilder, entity: ProvNodeRef, activity: ProvActivityId) -> Self {
+        Self { doc_builder, entity, activity, time_ms: None }
+    }
+
+    pub fn time_ms(mut self, time_ms: u64) -> Self {
+        self.time_ms = Some(time_ms);
+        self
+    }
+
+    pub fn build(mut self) -> ProvDocumentBuilder {
+        let id = self.doc_builder.doc.blank_node_id("gen");
+        let qualified_generation = QualifiedGeneration {
+            entity: self.entity,
+            activity: self.activity,
+            time_ms: self.time_ms,
+        };
+        self.doc_builder.doc.insert_qualified_generation(id, qualified_generation);
         self.doc_builder
     }
 }

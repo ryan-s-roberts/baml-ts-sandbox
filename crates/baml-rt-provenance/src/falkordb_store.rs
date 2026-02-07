@@ -15,8 +15,8 @@ use crate::normalizer::{
 };
 use crate::store::ProvenanceWriter;
 use crate::types::{
-    Activity, Agent, Entity, ProvActivityId, ProvAgentId, ProvEntityId, Used, WasAssociatedWith,
-    WasDerivedFrom, WasGeneratedBy,
+    Activity, Agent, Entity, ProvActivityId, ProvAgentId, ProvEntityId, QualifiedGeneration, Used,
+    WasAssociatedWith, WasDerivedFrom, WasGeneratedBy,
 };
 use crate::vocabulary::{
     a2a, a2a_relation_types, a2a_roles, message_directions, prov, prov_relations, prov_roles,
@@ -144,15 +144,39 @@ impl FalkorDbProvenanceWriter {
         generated_entries.sort_by(|(a, _), (b, _)| a.cmp(b));
         for (_, generated) in generated_entries {
             let props = was_generated_by_props(generated);
-            let entity_label = label_for_entity(&entity_labels, generated.entity.as_str());
+            let entity_label =
+                label_for_ref(generated.entity.clone(), &entity_labels, &activity_labels, &agent_labels);
             let activity_label = label_for_activity(&activity_labels, generated.activity.as_str());
             let rel_type = relation_label("WAS_GENERATED_BY", entity_label, activity_label, &props);
             clauses.push(merge_edge(
                 entity_label,
-                generated.entity.as_str(),
+                generated.entity.id(),
                 &rel_type,
                 activity_label,
                 generated.activity.as_str(),
+                &props,
+            ));
+        }
+        let mut qualified_gen_entries: Vec<(&String, &QualifiedGeneration)> =
+            normalized.document.qualified_generation().collect();
+        qualified_gen_entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+        for (_, generation) in qualified_gen_entries {
+            let props = qualified_generation_props(generation);
+            let entity_label =
+                label_for_ref(generation.entity.clone(), &entity_labels, &activity_labels, &agent_labels);
+            let activity_label = label_for_activity(&activity_labels, generation.activity.as_str());
+            let rel_type = relation_label(
+                prov_relations::QUALIFIED_GENERATION,
+                entity_label,
+                activity_label,
+                &props,
+            );
+            clauses.push(merge_edge(
+                entity_label,
+                generation.entity.id(),
+                &rel_type,
+                activity_label,
+                generation.activity.as_str(),
                 &props,
             ));
         }
@@ -293,6 +317,18 @@ fn was_generated_by_props(generated: &WasGeneratedBy) -> HashMap<String, Value> 
         Value::String(prov_relations::WAS_GENERATED_BY.to_string()),
     );
     if let Some(time_ms) = generated.time_ms {
+        props.insert(prov::TIME.to_string(), Value::Number(time_ms.into()));
+    }
+    props
+}
+
+fn qualified_generation_props(generation: &QualifiedGeneration) -> HashMap<String, Value> {
+    let mut props = HashMap::new();
+    props.insert(
+        prov::BASE_TYPE.to_string(),
+        Value::String(prov_relations::QUALIFIED_GENERATION.to_string()),
+    );
+    if let Some(time_ms) = generation.time_ms {
         props.insert(prov::TIME.to_string(), Value::Number(time_ms.into()));
     }
     props

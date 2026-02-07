@@ -14,8 +14,8 @@ use crate::id_semantics::{
     ToolCallActivityInput,
 };
 use crate::types::{
-    Activity, Agent, Entity, ProvActivityId, ProvAgentId, ProvEntityId, ProvNodeRef, Used,
-    WasAssociatedWith, WasDerivedFrom, WasGeneratedBy,
+    Activity, Agent, Entity, ProvActivityId, ProvAgentId, ProvEntityId, ProvNodeRef,
+    QualifiedGeneration, Used, WasAssociatedWith, WasDerivedFrom, WasGeneratedBy,
 };
 use crate::vocabulary::{
     a2a, a2a_relation_types, a2a_relations, a2a_roles, agent_types, message_directions,
@@ -406,6 +406,19 @@ fn normalize_event_with_registry(
                 },
             );
 
+            insert_was_generated_by(
+                &mut doc,
+                ProvNodeRef::Agent(instance_agent_id.clone()),
+                boot_activity_id.clone(),
+                Some(event.timestamp_ms()),
+            );
+            insert_qualified_generation(
+                &mut doc,
+                ProvNodeRef::Agent(instance_agent_id.clone()),
+                boot_activity_id.clone(),
+                Some(event.timestamp_ms()),
+            );
+
             // Link boot activity to runner runtime instance via association role.
             let runner_runtime_id = runner_runtime_instance_id();
             ensure_runner_runtime_instance(&mut doc);
@@ -453,7 +466,7 @@ fn normalize_event_with_registry(
             )?;
             insert_was_generated_by(
                 &mut doc,
-                task_entity.clone(),
+                ProvNodeRef::Entity(task_entity.clone()),
                 task_execution.clone(),
                 Some(event.timestamp_ms()),
             );
@@ -515,7 +528,7 @@ fn normalize_event_with_registry(
                 let task_entity = task_entity_id(task_id);
                 insert_was_generated_by(
                     &mut doc,
-                    task_entity,
+                    ProvNodeRef::Entity(task_entity),
                     task_execution.clone(),
                     Some(event.timestamp_ms()),
                 );
@@ -591,7 +604,7 @@ fn normalize_event_with_registry(
             );
             insert_was_generated_by(
                 &mut doc,
-                artifact_id_str.clone(),
+                ProvNodeRef::Entity(artifact_id_str.clone()),
                 task_execution.clone(),
                 Some(event.timestamp_ms()),
             );
@@ -687,7 +700,7 @@ fn normalize_event_with_registry(
                 ProvEventData::MessageSent { .. } => {
                     insert_was_generated_by(
                         &mut doc,
-                        message_id.clone(),
+                        ProvNodeRef::Entity(message_id.clone()),
                         processing_id.clone(),
                         Some(event.timestamp_ms()),
                     );
@@ -912,12 +925,22 @@ fn insert_used(doc: &mut ProvDocument, activity: ProvActivityId, entity: ProvEnt
 
 fn insert_was_generated_by(
     doc: &mut ProvDocument,
-    entity: ProvEntityId,
+    entity: ProvNodeRef,
     activity: ProvActivityId,
     time_ms: Option<u64>,
 ) {
     let id = doc.blank_node_id("g");
     doc.insert_was_generated_by(id, WasGeneratedBy { entity, activity, time_ms });
+}
+
+fn insert_qualified_generation(
+    doc: &mut ProvDocument,
+    entity: ProvNodeRef,
+    activity: ProvActivityId,
+    time_ms: Option<u64>,
+) {
+    let id = doc.blank_node_id("gen");
+    doc.insert_qualified_generation(id, QualifiedGeneration { entity, activity, time_ms });
 }
 
 fn insert_was_associated_with(

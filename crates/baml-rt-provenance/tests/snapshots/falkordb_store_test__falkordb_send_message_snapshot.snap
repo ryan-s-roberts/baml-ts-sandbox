@@ -73,6 +73,80 @@ expression: graph_snapshot_json(&graph_snapshot)
   ],
   [
     [
+      "AgentRuntimeInstance"
+    ],
+    "agent_instance:00000000-0000-0000-0000-000000000010",
+    {
+      "a2a:agent_id": "00000000-0000-0000-0000-000000000010",
+      "a2a:agent_type": "tony",
+      "a2a:agent_version": "1.0.0",
+      "a2a:context_id": "ctx-3-1",
+      "a2a:event_id": "prov-11",
+      "name": "agent_instance:00000000-0000-0000-0000-000000000010",
+      "prov:base_type": "ProvAgent",
+      "prov:type": "a2a:AgentRuntimeInstance"
+    },
+    "QUALIFIED_GENERATION",
+    {
+      "prov:base_type": "QUALIFIED_GENERATION",
+      "prov:time": 1700000001900
+    },
+    [
+      "AgentBoot"
+    ],
+    "agent_boot:00000000-0000-0000-0000-000000000010",
+    {
+      "a2a:agent_id": "00000000-0000-0000-0000-000000000010",
+      "a2a:agent_type": "tony",
+      "a2a:agent_version": "1.0.0",
+      "a2a:context_id": "ctx-3-1",
+      "a2a:event_id": "prov-11",
+      "name": "agent_boot:00000000-0000-0000-0000-000000000010",
+      "prov:base_type": "ProvActivity",
+      "prov:endTime": 1700000001900,
+      "prov:startTime": 1700000001900,
+      "prov:type": "a2a:AgentBoot"
+    }
+  ],
+  [
+    [
+      "AgentRuntimeInstance"
+    ],
+    "agent_instance:00000000-0000-0000-0000-000000000010",
+    {
+      "a2a:agent_id": "00000000-0000-0000-0000-000000000010",
+      "a2a:agent_type": "tony",
+      "a2a:agent_version": "1.0.0",
+      "a2a:context_id": "ctx-3-1",
+      "a2a:event_id": "prov-11",
+      "name": "agent_instance:00000000-0000-0000-0000-000000000010",
+      "prov:base_type": "ProvAgent",
+      "prov:type": "a2a:AgentRuntimeInstance"
+    },
+    "WAS_SPAWNED_BY",
+    {
+      "prov:base_type": "WAS_GENERATED_BY",
+      "prov:time": 1700000001900
+    },
+    [
+      "AgentBoot"
+    ],
+    "agent_boot:00000000-0000-0000-0000-000000000010",
+    {
+      "a2a:agent_id": "00000000-0000-0000-0000-000000000010",
+      "a2a:agent_type": "tony",
+      "a2a:agent_version": "1.0.0",
+      "a2a:context_id": "ctx-3-1",
+      "a2a:event_id": "prov-11",
+      "name": "agent_boot:00000000-0000-0000-0000-000000000010",
+      "prov:base_type": "ProvActivity",
+      "prov:endTime": 1700000001900,
+      "prov:startTime": 1700000001900,
+      "prov:type": "a2a:AgentBoot"
+    }
+  ],
+  [
+    [
       "LlmCall"
     ],
     "llm_call:prov-14",
