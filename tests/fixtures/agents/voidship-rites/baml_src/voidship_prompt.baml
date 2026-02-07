@@ -6,27 +6,7 @@ function VoidshipGreeting(name: string) -> string {
   "#
 }
 
-enum MathOperation {
-  Add @alias("+")
-  Subtract @alias("-")
-  Multiply @alias("*")
-  Divide @alias("/")
-}
-
-class Expression {
-  left int @description("The first number in the calculation")
-  operation MathOperation @description("The mathematical operation to perform")
-  right int @description("The second number in the calculation")
-}
-
-class RiteCalcTool {
-  tool_name "rite_calc" @description("Use this tool to perform mathematical calculations.")
-  expression Expression @description("The mathematical expression to calculate")
-}
-
-type RiteToolChoice = RiteCalcTool
-
-function ChooseRiteTool(user_message: string) -> RiteToolChoice {
+function ChooseRiteTool(user_message: string) -> SupportCalculateSessionPlan {
   client VoidshipOpenRouter
   prompt #"
     The petitioner says: {{ user_message }}

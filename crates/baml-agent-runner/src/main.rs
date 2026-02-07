@@ -13,7 +13,7 @@ use baml_rt_core::ids::{AgentId, DerivedId, ExternalId, TaskId};
 use baml_rt_a2a::a2a_types::A2aMessageId;
 use baml_rt_core::{BamlRtError, ContextId, Result};
 use baml_rt_core::context;
-use baml_rt_provenance::{AgentType, ProvEvent};
+use baml_rt_provenance::{AgentType, ProvEvent, ToolIndexConfig, index_tools};
 use baml_rt_observability::{spans, tracing_setup};
 use baml_rt_provenance::{
     FalkorDbProvenanceConfig, FalkorDbProvenanceWriter, InMemoryProvenanceStore, ProvenanceWriter,
@@ -22,12 +22,12 @@ use baml_rt_quickjs::BamlRuntimeManager;
 use anyhow::Context;
 use clap::{Parser, ValueEnum};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Mutex;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Agent package metadata
 #[derive(Debug, Clone)]
@@ -36,6 +36,7 @@ struct AgentManifest {
     name: String,
     entry_point: String,
     signature: String,
+    tools: Vec<String>,
 }
 
 /// Inert agent package - just holds package data
@@ -44,6 +45,7 @@ struct AgentPackage {
     version: String,
     entry_point: String,
     signature: String,
+    tools: Vec<String>,
     extract_dir: PathBuf,
     baml_src: PathBuf,
 }
@@ -84,6 +86,16 @@ impl AgentPackage {
         let manifest_json: Value = serde_json::from_str(&manifest_content)
             .map_err(BamlRtError::Json)?;
 
+        let tools = manifest_json
+            .get("tools")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| BamlRtError::InvalidArgument(
+                "manifest.json missing 'tools' field".to_string()
+            ))?
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect::<Vec<String>>();
+
         let manifest = AgentManifest {
             version: manifest_json
                 .get("version")
@@ -111,6 +123,7 @@ impl AgentPackage {
                     "manifest.json missing 'signature' field".to_string()
                 ))?
                 .to_string(),
+            tools,
         };
 
         info!(
@@ -133,6 +146,7 @@ impl AgentPackage {
             version: manifest.version,
             entry_point: manifest.entry_point,
             signature: manifest.signature,
+            tools: manifest.tools,
             extract_dir,
             baml_src,
         })
@@ -146,6 +160,7 @@ impl AgentPackage {
     async fn boot(
         &self,
         provenance_writer: Option<Arc<dyn ProvenanceWriter>>,
+        tool_index: Option<ToolIndexConfig>,
     ) -> Result<(A2aAgent, AgentId)> {
         let span = spans::load_agent_package(&self.extract_dir);
         let _guard = span.enter();
@@ -162,6 +177,10 @@ impl AgentPackage {
             runtime_manager.load_schema(baml_src_str)?;
             info!(agent = self.name, "BAML schema loaded");
         }
+
+        runtime_manager
+            .set_tool_allowlist(self.tools.iter().cloned().collect::<HashSet<_>>())
+            .await?;
 
         // Build A2aAgent - it will generate agent_id internally and create QuickJS bridge
         let runtime_manager_arc = Arc::new(Mutex::new(runtime_manager));
@@ -204,6 +223,16 @@ impl AgentPackage {
                 entry_point = self.entry_point,
                 "Agent entry point not found, skipping JavaScript initialization"
             );
+        }
+
+        if let Some(index_config) = tool_index {
+            let manager = runtime_manager_arc.lock().await;
+            let tools = manager.export_tool_metadata().await;
+            if let Err(err) = index_tools(&index_config, &tools).await {
+                warn!(error = %err, "Failed to index tool metadata in FalkorDB");
+            } else {
+                info!("Tool metadata indexed in FalkorDB");
+            }
         }
 
         // Get agent_id from the agent (generated during A2aAgent::build())
@@ -262,13 +291,18 @@ impl BootedAgent {
 struct AgentRunner {
     agents: HashMap<String, BootedAgent>,
     provenance_writer: Option<Arc<dyn ProvenanceWriter>>,
+    tool_index: Option<ToolIndexConfig>,
 }
 
 impl AgentRunner {
-    fn new(provenance_writer: Option<Arc<dyn ProvenanceWriter>>) -> Self {
+    fn new(
+        provenance_writer: Option<Arc<dyn ProvenanceWriter>>,
+        tool_index: Option<ToolIndexConfig>,
+    ) -> Self {
         Self {
             agents: HashMap::new(),
             provenance_writer,
+            tool_index,
         }
     }
 
@@ -277,7 +311,9 @@ impl AgentRunner {
         let package = AgentPackage::load_from_file(package_path).await?;
         let name = package.name().to_string();
         // Boot the package into a running agent
-        let (agent, _agent_id) = package.boot(self.provenance_writer.clone()).await?;
+        let (agent, _agent_id) = package
+            .boot(self.provenance_writer.clone(), self.tool_index.clone())
+            .await?;
         
         let booted = BootedAgent {
             agent,
@@ -660,7 +696,13 @@ async fn main() -> anyhow::Result<()> {
     // Parse command line arguments
     let config = Cli::parse().into_config().context("Failed to parse arguments")?;
     let provenance_writer = build_provenance_writer(&config.provenance_store);
-    let mut runner = AgentRunner::new(provenance_writer);
+    let tool_index = match &config.provenance_store {
+        ProvenanceStoreKind::FalkorDb { url, graph } => {
+            Some(ToolIndexConfig::new(url.clone(), graph.clone()))
+        }
+        ProvenanceStoreKind::Memory => None,
+    };
+    let mut runner = AgentRunner::new(provenance_writer, tool_index);
 
     for package in &config.packages {
         let package_path = Path::new(package);

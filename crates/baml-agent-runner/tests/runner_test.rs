@@ -10,8 +10,12 @@ use flate2::write::GzEncoder;
 use tar::Builder;
 use async_trait::async_trait;
 use serde_json::json;
+use serde::{Deserialize, Serialize};
+use schemars::JsonSchema;
+use ts_rs::TS;
 use baml_rt::tools::BamlTool;
 use baml_rt::a2a_types::{JSONRPCId, JSONRPCRequest, Message, MessageRole, Part, SendMessageRequest};
+use std::collections::HashSet;
 
 use test_support::common::{ensure_baml_src_exists, agent_fixture, workspace_root, CalculatorTool};
 /// Create a test agent package from a fixture agent
@@ -50,7 +54,11 @@ fn create_test_agent_package(output_path: &Path) -> Result<(), Box<dyn std::erro
         "description": "Test agent package for E2E testing",
         "entry_point": "dist/index.js",
         "runtime_version": "0.1.0",
-        "signature": "test-agent@1.0.0"
+        "signature": "test-agent@1.0.0",
+        "tools": [
+            "test/add_numbers",
+            "support/calculate"
+        ]
     });
     fs::write(temp_dir.join("manifest.json"), serde_json::to_string_pretty(&manifest)?)?;
 
@@ -88,30 +96,32 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), Box<dyn std::error::Error>
 
 struct AddNumbersTool;
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(export)]
+struct AddNumbersInput {
+    a: f64,
+    b: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(export)]
+struct AddNumbersOutput {
+    result: f64,
+}
+
 #[async_trait]
 impl BamlTool for AddNumbersTool {
-    const NAME: &'static str = "add_numbers";
+    const NAME: &'static str = "test/add_numbers";
+    type OpenInput = ();
+    type Input = AddNumbersInput;
+    type Output = AddNumbersOutput;
 
     fn description(&self) -> &'static str {
         "Adds two numbers together"
     }
 
-    fn input_schema(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "a": {"type": "number"},
-                "b": {"type": "number"}
-            },
-            "required": ["a", "b"]
-        })
-    }
-
-    async fn execute(&self, args: serde_json::Value) -> baml_rt::Result<serde_json::Value> {
-        let obj = args.as_object().expect("Expected object");
-        let a = obj.get("a").and_then(|v| v.as_f64()).expect("Expected 'a' number");
-        let b = obj.get("b").and_then(|v| v.as_f64()).expect("Expected 'b' number");
-        Ok(json!({ "result": a + b }))
+    async fn execute(&self, args: Self::Input) -> baml_rt::Result<Self::Output> {
+        Ok(AddNumbersOutput { result: args.a + args.b })
     }
 }
 
@@ -141,8 +151,6 @@ async fn setup_voidship_agent() -> baml_rt::A2aAgent {
     {
         manager.register_tool(AddNumbersTool).await.unwrap();
         manager.register_tool(CalculatorTool).await.unwrap();
-        manager.map_baml_variant_to_tool("RiteCalcTool", "calculate");
-        manager.map_baml_variant_to_tool("CalculatorTool", "calculate");
     }
     let dist_path = agent_dir.join("dist").join("index.js");
     let src_path = agent_dir.join("src").join("index.ts");
@@ -157,6 +165,28 @@ async fn setup_voidship_agent() -> baml_rt::A2aAgent {
         .build()
         .await
         .unwrap()
+}
+
+#[tokio::test]
+async fn test_manifest_allowlist_blocks_undeclared_tool() {
+    let mut manager = BamlRuntimeManager::new().unwrap();
+    manager.register_tool(CalculatorTool).await.unwrap();
+
+    manager.set_tool_allowlist(HashSet::new()).await.unwrap();
+    let blocked = manager.open_tool_session("support/calculate").await;
+    assert!(
+        blocked
+            .err()
+            .map(|err| err.to_string().contains("manifest allowlist"))
+            .unwrap_or(false),
+        "Expected allowlist to block undeclared tool"
+    );
+
+    let mut allowlist = HashSet::new();
+    allowlist.insert("support/calculate".to_string());
+    manager.set_tool_allowlist(allowlist).await.unwrap();
+    let session = manager.open_tool_session("support/calculate").await;
+    assert!(session.is_ok(), "Expected allowlisted tool to open");
 }
 
 #[tokio::test]

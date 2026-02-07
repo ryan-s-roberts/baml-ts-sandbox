@@ -3,6 +3,8 @@
 use baml_rt_core::{BamlRtError, Result};
 use crate::builder::traits::{TypeScriptCompiler, TypeGenerator, FileSystem};
 use crate::builder::types::BuildDir;
+use crate::builder::ts_gen::{load_manifest_tools, render_ts_declarations};
+use crate::builder::baml_gen::render_baml_tool_interfaces;
 use std::fs;
 use std::path::Path;
 
@@ -124,7 +126,15 @@ impl TypeGenerator for RuntimeTypeGenerator {
         use baml_runtime::BamlRuntime;
         use std::collections::HashMap;
         
-        // Load BAML runtime to discover functions
+        // Generate BAML tool interfaces FIRST (before loading runtime, since prompts may reference them)
+        let tool_names = load_manifest_tools(baml_src)?;
+        if !tool_names.is_empty() {
+            let baml_interfaces = render_baml_tool_interfaces(&tool_names)?;
+            let baml_output_path = baml_src.join("generated_tools.baml");
+            fs::write(&baml_output_path, baml_interfaces).map_err(BamlRtError::Io)?;
+        }
+        
+        // Load BAML runtime to discover functions (after generating BAML interfaces)
         let env_vars: HashMap<String, String> = HashMap::new();
         let feature_flags = internal_baml_core::feature_flags::FeatureFlags::default();
         
@@ -133,33 +143,16 @@ impl TypeGenerator for RuntimeTypeGenerator {
         
         // Get function names from runtime
         let function_names: Vec<String> = runtime.function_names().map(|s| s.to_string()).collect();
-
-        // Generate type declarations
-        let mut declarations = String::from("// TypeScript declarations for BAML runtime host functions\n");
-        declarations.push_str("// This file is auto-generated - do not edit manually\n");
-        declarations.push_str("// Generated from BAML runtime\n\n");
-
-        // Generate function declarations - using any for now since we don't have full type info
-        // TypeScript will infer types at runtime through our QuickJS bridge
-        for function_name in &function_names {
-            declarations.push_str(&format!(
-                "/**\n * {} BAML function\n */\ndeclare function {}(args?: Record<string, any>): Promise<any>;\n\n",
-                function_name, function_name
-            ));
-        }
         
-        // Add invokeTool declaration
-        declarations.push_str("/**\n");
-        declarations.push_str(" * Dynamically invoke a tool by name.\n");
-        declarations.push_str(" * Works for both Rust-registered tools and JavaScript-registered tools.\n");
-        declarations.push_str(" */\ndeclare function invokeTool(toolName: string, args: Record<string, any>): Promise<any>;\n\n");
-
-        let output_path = build_dir.join("dist").join("baml-runtime.d.ts");
-        if let Some(parent) = output_path.parent() {
+        // Generate TypeScript declarations
+        let declarations = render_ts_declarations(&function_names, &tool_names)?;
+        let ts_output_path = build_dir.join("dist").join("baml-runtime.d.ts");
+        if let Some(parent) = ts_output_path.parent() {
             fs::create_dir_all(parent).map_err(BamlRtError::Io)?;
         }
-        fs::write(&output_path, declarations).map_err(BamlRtError::Io)?;
+        fs::write(&ts_output_path, declarations).map_err(BamlRtError::Io)?;
 
         Ok(())
     }
 }
+

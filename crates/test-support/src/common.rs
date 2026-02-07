@@ -104,11 +104,30 @@ pub fn workspace_root() -> PathBuf {
 pub async fn assert_tool_registered_in_js(bridge: &mut QuickJSBridge, tool_name: &str) {
     let js_code = format!(
         r#"
-        (() => JSON.stringify({{
-            toolExists: typeof {} === 'function'
-        }}))()
+        (async () => {{
+            const jsTools = globalThis.__js_tools || {{}};
+            if (typeof jsTools["{}"] === 'function') {{
+                return JSON.stringify({{
+                    toolExists: true,
+                    source: "js"
+                }});
+            }}
+            try {{
+                const session = await openToolSession("{}");
+                return JSON.stringify({{
+                    toolExists: true,
+                    source: "rust",
+                    sessionId: session.sessionId
+                }});
+            }} catch (error) {{
+                return JSON.stringify({{
+                    toolExists: false,
+                    error: error.toString()
+                }});
+            }}
+        }})()
         "#,
-        tool_name
+        tool_name, tool_name
     );
     let result = bridge.evaluate(&js_code).await.expect("Should check tool registration");
     let obj = result.as_object().expect("Expected object");

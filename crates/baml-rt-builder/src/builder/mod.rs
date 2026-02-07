@@ -8,6 +8,9 @@ pub mod traits;
 pub mod filesystem;
 pub mod linter;
 pub mod compiler;
+pub mod ts_gen;
+pub mod baml_gen;
+pub mod schema_to_baml;
 pub mod packager;
 pub mod service;
 

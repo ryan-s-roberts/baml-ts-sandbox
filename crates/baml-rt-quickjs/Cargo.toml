@@ -27,3 +27,5 @@ uuid = { workspace = true }
 test-support = { path = "../test-support" }
 baml-rt = { path = "../baml-rt" }
 tokio-test = { workspace = true }
+schemars = { workspace = true }
+ts-rs = { workspace = true }

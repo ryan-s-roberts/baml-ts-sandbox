@@ -12,6 +12,7 @@ path = "src/baml-agent-builder.rs"
 baml-rt-core = { path = "../baml-rt-core" }
 baml-rt-observability = { path = "../baml-rt-observability" }
 baml-rt-quickjs = { path = "../baml-rt-quickjs" }
+baml-rt-tools = { path = "../baml-rt-tools" }
 baml-runtime = { workspace = true }
 internal-baml-core = { workspace = true }
 serde_json = { workspace = true }
@@ -29,8 +30,10 @@ clap = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true }
+genco = "0.19.0"
 
 [dev-dependencies]
 test-support = { path = "../test-support" }
 baml-rt = { path = "../baml-rt" }
 tempfile = { workspace = true }
+insta = { workspace = true }

@@ -24,3 +24,6 @@ test-support = { path = "../test-support" }
 baml-rt = { path = "../baml-rt" }
 async-trait = { workspace = true }
 dotenvy = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
+ts-rs = { workspace = true }

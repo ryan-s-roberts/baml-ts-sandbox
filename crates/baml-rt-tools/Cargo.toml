@@ -7,9 +7,16 @@ authors = { workspace = true }
 [dependencies]
 baml-rt-core = { path = "../baml-rt-core" }
 serde_json = { workspace = true }
+serde = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
+schemars = "1.1.0"
+ts-rs = "11.1.0"
+uuid = { workspace = true }
+notion-client = "1.0.11"
+genco = { workspace = true }
+inventory = { workspace = true }
 
 [dev-dependencies]
 test-support = { path = "../test-support" }

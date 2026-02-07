@@ -51,7 +51,7 @@ async function buildBamlResponse(text, contextId) {
     const toolName =
       toolChoice && typeof toolChoice.tool_name === "string"
         ? toolChoice.tool_name
-        : "tony_memory";
+        : "memory/tony";
     const toolArgs = {
       limit:
         toolChoice && typeof toolChoice.limit === "number" ? toolChoice.limit : 6,
@@ -79,4 +79,5 @@ async function handle_a2a_request(request) {
   return { message: newMessage(`resp-${messageId}`, `I don't know what to do with "${text}".`) };
 }
 globalThis.handle_a2a_request = handle_a2a_request;
-globalThis.tony_memory = tony_memory;
+globalThis.__js_tools = globalThis.__js_tools || {};
+globalThis.__js_tools["memory/tony"] = tony_memory;

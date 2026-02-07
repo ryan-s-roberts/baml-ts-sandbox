@@ -1,8 +1,8 @@
 // @ts-nocheck
 const LONG_RITE_TOKEN = "long-rite";
-const taskState: Record<string, string> = {};
+const taskState = {};
 
-function extractText(params: any): string {
+function extractText(params) {
   if (!params) {
     return "unknown";
   }
@@ -19,7 +19,7 @@ function extractText(params: any): string {
   return "unknown";
 }
 
-function newMessage(messageId: string, text: string) {
+function newMessage(messageId, text) {
   return {
     messageId,
     role: "ROLE_AGENT",
@@ -31,7 +31,7 @@ function newMessage(messageId: string, text: string) {
   };
 }
 
-function newTask(taskId: string, contextId: string, message: any) {
+function newTask(taskId, contextId, message) {
   taskState[taskId] = "TASK_STATE_WORKING";
   return {
     id: taskId,
@@ -43,7 +43,7 @@ function newTask(taskId: string, contextId: string, message: any) {
   };
 }
 
-async function fakeStreamRiteTool(text: string, taskId: string, contextId: string) {
+async function fakeStreamRiteTool(text, taskId, contextId) {
   if (taskState[taskId] === "TASK_STATE_CANCELED") {
     return [
       {
@@ -98,7 +98,7 @@ async function fakeStreamRiteTool(text: string, taskId: string, contextId: strin
 }
 
 
-async function handle_a2a_request(request: any) {
+async function handle_a2a_request(request) {
   const method = request && request.method;
   const params = request && request.params ? request.params : {};
   const text = extractText(params);
@@ -112,17 +112,19 @@ async function handle_a2a_request(request: any) {
         task: newTask(taskId, contextId, params.message)
       };
     }
-    // Use BAML to determine if a tool call is needed
+    // BAML executes host tools in Rust; JS receives the result.
     try {
-      const toolChoice = await ChooseRiteTool({ user_message: text });
-      const toolResult = await __tool_from_baml_result(JSON.stringify(toolChoice));
-      return {
-        message: newMessage(
-          `resp-${messageId}`,
-          `BAML rite complete: sum=${toolResult.result}`
-        ),
-        task: newTask(taskId, contextId, params.message)
-      };
+      const toolResult = await ChooseRiteTool({ user_message: text });
+      if (toolResult && typeof toolResult === "object" && "result" in toolResult) {
+        return {
+          message: newMessage(
+            `resp-${messageId}`,
+            `BAML rite complete: sum=${toolResult.result}`
+          ),
+          task: newTask(taskId, contextId, params.message)
+        };
+      }
+      throw new Error("BAML tool returned no output");
     } catch (e) {
       // If tool calling fails or isn't needed, continue with normal response
     }
@@ -140,7 +142,7 @@ async function handle_a2a_request(request: any) {
   };
 }
 
-async function handle_a2a_cancel(args: any) {
+async function handle_a2a_cancel(args) {
   const taskId = args && args.id ? args.id : "unknown";
   taskState[taskId] = "TASK_STATE_CANCELED";
   return {

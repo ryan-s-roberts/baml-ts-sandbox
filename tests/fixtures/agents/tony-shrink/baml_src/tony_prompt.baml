@@ -1,6 +1,6 @@
 // Tony-inspired therapy prompt for fixture testing
 class TonyMemoryTool {
-  tool_name "tony_memory" @description("Fetch recent conversation memory for Tony.")
+  tool_name "memory/tony" @description("Fetch recent conversation memory for Tony.")
   limit int @description("Maximum number of memory items to return")
 }
 
@@ -11,7 +11,7 @@ function ChooseTonyMemoryTool(user_message: string) -> TonyToolChoice {
   prompt #"
     The user said: {{ user_message }}
     
-    Call the tony_memory tool with a limit of 6 to fetch recent context.
+    Call the memory/tony tool with a limit of 6 to fetch recent context.
     
     {{ ctx.output_format }}
 

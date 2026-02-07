@@ -2,8 +2,12 @@
 
 use baml_rt::{A2aRequestHandler, Result};
 use baml_rt::tools::BamlTool;
+use baml_rt_tools::bundles::Support;
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::Value;
+use serde::{Deserialize, Serialize};
+use schemars::JsonSchema;
+use ts_rs::TS;
 use tokio::task;
 use std::sync::Arc;
 
@@ -34,30 +38,34 @@ impl A2aRelayTool {
 
 #[async_trait]
 impl BamlTool for A2aRelayTool {
-    const NAME: &'static str = "a2a_relay";
+    type Bundle = Support;
+    const LOCAL_NAME: &'static str = "a2a_relay";
+    type OpenInput = ();
+    type Input = A2aRelayInput;
+    type Output = A2aRelayOutput;
 
     fn description(&self) -> &'static str {
         "Relays an A2A request to another in-memory agent."
     }
 
-    fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "request": { "type": "object" }
-            },
-            "required": ["request"]
-        })
-    }
-
-    async fn execute(&self, args: Value) -> Result<Value> {
-        let request = args
-            .get("request")
-            .cloned()
-            .unwrap_or_else(|| json!({}));
+    async fn execute(&self, args: Self::Input) -> Result<Self::Output> {
         let handle = tokio::runtime::Handle::current();
         let responses =
-            task::block_in_place(|| handle.block_on(self.client.send(request)))?;
-        Ok(json!({ "responses": responses }))
+            task::block_in_place(|| handle.block_on(self.client.send(args.request)))?;
+        Ok(A2aRelayOutput { responses })
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(export)]
+pub struct A2aRelayInput {
+    #[ts(type = "any")]
+    request: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(export)]
+pub struct A2aRelayOutput {
+    #[ts(type = "any[]")]
+    responses: Vec<Value>,
 }

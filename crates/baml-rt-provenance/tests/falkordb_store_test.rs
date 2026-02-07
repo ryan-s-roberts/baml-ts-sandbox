@@ -273,7 +273,7 @@ async fn falkordb_writer_persists_large_document() {
         timestamp_ms: 1_700_000_001_800,
         data: ProvEventData::ToolCallStarted {
             scope: CallScope::Task { task_id: task_id.clone() },
-            tool_name: "tony_memory".to_string(),
+            tool_name: "memory/tony".to_string(),
             function_name: Some("ChooseTonyMemoryTool".to_string()),
             args: json!({
                 "limit": 6,
@@ -289,7 +289,7 @@ async fn falkordb_writer_persists_large_document() {
         timestamp_ms: 1_700_000_001_900,
         data: ProvEventData::ToolCallCompleted {
             scope: CallScope::Task { task_id: task_id.clone() },
-            tool_name: "tony_memory".to_string(),
+            tool_name: "memory/tony".to_string(),
             function_name: Some("ChooseTonyMemoryTool".to_string()),
             args: json!({
                 "limit": 6,
@@ -488,7 +488,7 @@ async fn falkordb_writer_persists_send_message_calls_without_task() {
             scope: CallScope::Message {
                 message_id: MessageId::from_external(ExternalId::new("msg-10")),
             },
-            tool_name: "tony_memory".to_string(),
+            tool_name: "memory/tony".to_string(),
             function_name: Some("ChooseTonyMemoryTool".to_string()),
             args: json!({"limit": 3}),
             metadata: json!({"message_id": "msg-10"}),
@@ -502,7 +502,7 @@ async fn falkordb_writer_persists_send_message_calls_without_task() {
             scope: CallScope::Message {
                 message_id: MessageId::from_external(ExternalId::new("msg-10")),
             },
-            tool_name: "tony_memory".to_string(),
+            tool_name: "memory/tony".to_string(),
             function_name: Some("ChooseTonyMemoryTool".to_string()),
             args: json!({"limit": 3}),
             metadata: json!({"message_id": "msg-10", "result": {"count": 0}, "agent_id": agent_id}),

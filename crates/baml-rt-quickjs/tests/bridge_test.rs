@@ -7,6 +7,9 @@ use baml_rt_core::ids::{AgentId, ContextId, ExternalId, MessageId, TaskId, UuidI
 use baml_rt_tools::BamlTool;
 use serde_json::{json, Value};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use schemars::JsonSchema;
+use ts_rs::TS;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::LocalSet;
@@ -67,12 +70,14 @@ async fn test_quickjs_concurrent_scope_propagation() {
         .expect("register helpers");
 
     bridge
-        .evaluate(
-            r#"
-            globalThis.js_scope_tool = async function(args) {
-                return await invokeTool("scope_echo", args);
-            };
-            "#,
+        .register_js_tool(
+            "js/scope_tool",
+            r#"async function(args) {
+                const session = await openToolSession("test/scope_echo");
+                await session.send(args);
+                const step = await session.continue();
+                return step && step.output ? step.output : {};
+            }"#,
         )
         .await
         .expect("register js tool");
@@ -100,7 +105,7 @@ async fn test_quickjs_concurrent_scope_propagation() {
                     let result = context::with_scope(scope, async move {
                         let mut bridge = bridge.lock().await;
                         bridge
-                            .invoke_js_tool("js_scope_tool", json!({"text": "ping"}))
+                            .invoke_js_tool("js/scope_tool", json!({"text": "ping"}))
                             .await
                     })
                     .await
@@ -228,31 +233,39 @@ async fn test_quickjs_concurrent_stream_scope_propagation() {
 #[derive(Debug)]
 struct ScopeEchoTool;
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(export)]
+struct ScopeEchoInput {
+    text: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(export)]
+struct ScopeEchoOutput {
+    context_id: Option<String>,
+    message_id: Option<String>,
+    task_id: Option<String>,
+}
+
 #[async_trait]
 impl BamlTool for ScopeEchoTool {
-    const NAME: &'static str = "scope_echo";
+    const NAME: &'static str = "test/scope_echo";
+    type OpenInput = ();
+    type Input = ScopeEchoInput;
+    type Output = ScopeEchoOutput;
 
     fn description(&self) -> &'static str {
         "Echoes current runtime scope."
     }
 
-    fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "text": { "type": "string" }
-            }
-        })
-    }
-
-    async fn execute(&self, _args: Value) -> baml_rt::Result<Value> {
+    async fn execute(&self, _args: Self::Input) -> baml_rt::Result<Self::Output> {
         let context_id = context::current_context_id().map(|id| id.as_str().to_string());
         let message_id = context::current_message_id().map(|id| id.as_str().to_string());
         let task_id = context::current_task_id().map(|id| id.as_str().to_string());
-        Ok(json!({
-            "context_id": context_id,
-            "message_id": message_id,
-            "task_id": task_id,
-        }))
+        Ok(ScopeEchoOutput {
+            context_id,
+            message_id,
+            task_id,
+        })
     }
 }

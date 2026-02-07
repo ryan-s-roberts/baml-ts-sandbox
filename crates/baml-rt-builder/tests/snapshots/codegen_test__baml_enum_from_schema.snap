@@ -1,0 +1,10 @@
+---
+source: crates/baml-rt-builder/tests/codegen_test.rs
+expression: baml_output
+---
+enum MathOperation {
+  Add
+  Subtract
+  Multiply
+  Divide
+}
