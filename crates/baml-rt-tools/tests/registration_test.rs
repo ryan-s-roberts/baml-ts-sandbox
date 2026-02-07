@@ -3,6 +3,9 @@
 use async_trait::async_trait;
 use baml_rt::tools::BamlTool;
 use serde_json::json;
+use serde::{Deserialize, Serialize};
+use schemars::JsonSchema;
+use ts_rs::TS;
 
 use test_support::common::{
     assert_tool_registered_in_js,
@@ -15,93 +18,106 @@ use tokio::sync::Mutex;
 // Simple test tools
 struct AddNumbersTool;
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(export)]
+struct AddNumbersInput {
+    a: f64,
+    b: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(export)]
+struct AddNumbersOutput {
+    result: f64,
+}
+
 #[async_trait]
 impl BamlTool for AddNumbersTool {
-    const NAME: &'static str = "add_numbers";
+    const NAME: &'static str = "test/add_numbers";
+    type OpenInput = ();
+    type Input = AddNumbersInput;
+    type Output = AddNumbersOutput;
     
     fn description(&self) -> &'static str {
         "Adds two numbers together"
     }
     
-    fn input_schema(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "a": {"type": "number", "description": "First number"},
-                "b": {"type": "number", "description": "Second number"}
-            },
-            "required": ["a", "b"]
-        })
-    }
-    
-    async fn execute(&self, args: serde_json::Value) -> baml_rt::Result<serde_json::Value> {
-        let obj = args.as_object().expect("Expected object");
-        let a = obj.get("a").and_then(|v| v.as_f64()).expect("Expected 'a' number");
-        let b = obj.get("b").and_then(|v| v.as_f64()).expect("Expected 'b' number");
-        Ok(json!({"result": a + b}))
+    async fn execute(&self, args: Self::Input) -> baml_rt::Result<Self::Output> {
+        Ok(AddNumbersOutput { result: args.a + args.b })
     }
 }
 
 struct GreetTool;
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(export)]
+struct GreetInput {
+    name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(export)]
+struct GreetOutput {
+    greeting: String,
+}
+
 #[async_trait]
 impl BamlTool for GreetTool {
-    const NAME: &'static str = "greet";
+    const NAME: &'static str = "test/greet";
+    type OpenInput = ();
+    type Input = GreetInput;
+    type Output = GreetOutput;
     
     fn description(&self) -> &'static str {
         "Returns a greeting message"
     }
     
-    fn input_schema(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Name to greet"}
-            },
-            "required": ["name"]
+    async fn execute(&self, args: Self::Input) -> baml_rt::Result<Self::Output> {
+        Ok(GreetOutput {
+            greeting: format!("Hello, {}!", args.name),
         })
-    }
-    
-    async fn execute(&self, args: serde_json::Value) -> baml_rt::Result<serde_json::Value> {
-        let obj = args.as_object().expect("Expected object");
-        let name = obj.get("name").and_then(|v| v.as_str()).expect("Expected 'name' string");
-        Ok(json!({"greeting": format!("Hello, {}!", name)}))
     }
 }
 
 struct StreamLettersTool;
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(export)]
+struct StreamLettersInput {
+    word: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(export)]
+struct StreamLettersOutput {
+    letters: Vec<String>,
+    count: usize,
+}
+
 #[async_trait]
 impl BamlTool for StreamLettersTool {
-    const NAME: &'static str = "stream_letters";
+    const NAME: &'static str = "test/stream_letters";
+    type OpenInput = ();
+    type Input = StreamLettersInput;
+    type Output = StreamLettersOutput;
     
     fn description(&self) -> &'static str {
         "Streams letters of a word one by one"
     }
     
-    fn input_schema(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "word": {"type": "string", "description": "Word to stream"}
-            },
-            "required": ["word"]
-        })
-    }
-    
-    async fn execute(&self, args: serde_json::Value) -> baml_rt::Result<serde_json::Value> {
+    async fn execute(&self, args: Self::Input) -> baml_rt::Result<Self::Output> {
         use tokio::time::{sleep, Duration};
-        
-        let obj = args.as_object().expect("Expected object");
-        let word = obj.get("word").and_then(|v| v.as_str()).expect("Expected 'word' string");
         
         // Simulate streaming by waiting a bit
         sleep(Duration::from_millis(10)).await;
         
         // Return all letters as an array (in a real streaming scenario,
         // this would be a stream, but for now we return the result)
-        let letters: Vec<String> = word.chars().map(|c| c.to_string()).collect();
-        Ok(json!({"letters": letters, "count": letters.len()}))
+        let letters: Vec<String> = args.word.chars().map(|c| c.to_string()).collect();
+        Ok(StreamLettersOutput {
+            count: letters.len(),
+            letters,
+        })
     }
 }
 
@@ -119,7 +135,7 @@ async fn test_register_and_execute_tool_rust() {
     // Test executing the tool directly from Rust
     {
         let manager = baml_manager.lock().await;
-        let result = manager.execute_tool("add_numbers", json!({"a": 5, "b": 3})).await.unwrap();
+        let result = manager.execute_tool("test/add_numbers", json!({"a": 5, "b": 3})).await.unwrap();
         
         let result_obj = result.as_object().expect("Expected object");
         let sum = result_obj.get("result").and_then(|v| v.as_f64()).expect("Expected 'result' number");
@@ -131,7 +147,7 @@ async fn test_register_and_execute_tool_rust() {
     {
         let manager = baml_manager.lock().await;
         let tools = manager.list_tools().await;
-        assert!(tools.contains(&"add_numbers".to_string()), "Should list registered tool");
+        assert!(tools.contains(&"test/add_numbers".to_string()), "Should list registered tool");
     }
 }
 
@@ -151,12 +167,12 @@ async fn test_register_and_execute_tool_js() {
 
     // Test that tool is registered in QuickJS
     // Since eval() can't await promises, we verify registration and test execution via Rust
-    assert_tool_registered_in_js(&mut bridge, "greet").await;
+    assert_tool_registered_in_js(&mut bridge, "test/greet").await;
 
     // Test executing the tool directly from Rust to verify it works end-to-end
     {
         let manager = baml_manager.lock().await;
-        let result = manager.execute_tool("greet", json!({"name": "World"})).await.unwrap();
+        let result = manager.execute_tool("test/greet", json!({"name": "World"})).await.unwrap();
         
         let result_obj = result.as_object().expect("Expected object");
         let greeting = result_obj.get("greeting").and_then(|g| g.as_str()).unwrap();
@@ -178,7 +194,7 @@ async fn test_async_streaming_tool() {
     // Test executing the streaming tool
     {
         let manager = baml_manager.lock().await;
-        let result = manager.execute_tool("stream_letters", json!({"word": "test"})).await.unwrap();
+        let result = manager.execute_tool("test/stream_letters", json!({"word": "test"})).await.unwrap();
         
         let result_obj = result.as_object().expect("Expected object");
         let letters = result_obj.get("letters").and_then(|v| v.as_array()).expect("Expected 'letters' array");
@@ -199,21 +215,21 @@ async fn test_register_js_tool() {
     let mut bridge = setup_bridge(baml_manager.clone()).await;
     
     // Register a simple JavaScript tool
-    bridge.register_js_tool("greet_js", r#"
-        async function(name) {
-            return { greeting: `Hello, ${name}!` };
+    bridge.register_js_tool("js/greet", r#"
+        async function(args) {
+            return { greeting: `Hello, ${args.name}!` };
         }
     "#).await.unwrap();
     
     // Verify it's listed
     let js_tools = bridge.list_js_tools();
-    assert!(js_tools.contains(&"greet_js".to_string()), "Should list greet_js tool");
+    assert!(js_tools.contains(&"js/greet".to_string()), "Should list js/greet tool");
     
     // Verify it's callable from JavaScript
     let _js_code = r#"
         (async () => {
             try {
-                const result = await greet_js("World");
+                const result = await invokeTool("js/greet", { name: "World" });
                 return JSON.stringify({
                     success: true,
                     greeting: result.greeting
@@ -228,11 +244,11 @@ async fn test_register_js_tool() {
     "#;
     
     // Note: We can't easily await this in eval(), but we can check it exists
-    assert_tool_registered_in_js(&mut bridge, "greet_js").await;
+    assert_tool_registered_in_js(&mut bridge, "js/greet").await;
 
     let check_code = r#"
         (() => JSON.stringify({
-            isAsync: greet_js.constructor.name === 'AsyncFunction'
+            isAsync: typeof invokeTool === 'function'
         }))()
     "#;
 
@@ -240,7 +256,7 @@ async fn test_register_js_tool() {
     let obj = result.as_object().unwrap();
     assert!(
         obj.get("isAsync").and_then(|v| v.as_bool()).unwrap_or(false),
-        "greet_js should be async"
+        "invokeTool should be available"
     );
     
     tracing::info!("✅ JavaScript tool registered successfully");
@@ -255,19 +271,19 @@ async fn test_register_js_tool_with_complex_logic() {
     let mut bridge = setup_bridge(baml_manager.clone()).await;
     
     // Register a more complex JavaScript tool
-    bridge.register_js_tool("calculate_js", r#"
-        async function(expression) {
+    bridge.register_js_tool("js/calculate", r#"
+        async function(args) {
             try {
                 // Simple calculator using eval (for testing only - would use safer parser in production)
-                const result = Function('"use strict"; return (' + expression + ')')();
+                const result = Function('"use strict"; return (' + args.expression + ')')();
                 return {
-                    expression: expression,
+                    expression: args.expression,
                     result: result,
-                    formatted: `${expression} = ${result}`
+                    formatted: `${args.expression} = ${result}`
                 };
             } catch (e) {
                 return {
-                    expression: expression,
+                    expression: args.expression,
                     error: e.message
                 };
             }
@@ -276,10 +292,10 @@ async fn test_register_js_tool_with_complex_logic() {
     
     // Verify it exists
     let js_tools = bridge.list_js_tools();
-    assert!(js_tools.contains(&"calculate_js".to_string()), "Should list calculate_js tool");
+    assert!(js_tools.contains(&"js/calculate".to_string()), "Should list js/calculate tool");
     
     // Check function exists
-    assert_tool_registered_in_js(&mut bridge, "calculate_js").await;
+    assert_tool_registered_in_js(&mut bridge, "js/calculate").await;
     
     tracing::info!("✅ Complex JavaScript tool registered successfully");
 }
@@ -293,7 +309,7 @@ async fn test_js_tool_not_available_in_rust() {
     let mut bridge = setup_bridge(baml_manager.clone()).await;
     
     // Register a JavaScript tool
-    bridge.register_js_tool("js_only_tool", r#"
+    bridge.register_js_tool("js/only", r#"
         async function() {
             return { from: "javascript" };
         }
@@ -302,12 +318,12 @@ async fn test_js_tool_not_available_in_rust() {
     // Verify it's NOT in the Rust tool registry
     let manager = baml_manager.lock().await;
     let rust_tools = manager.list_tools().await;
-    assert!(!rust_tools.contains(&"js_only_tool".to_string()),
+    assert!(!rust_tools.contains(&"js/only".to_string()),
         "JS tool should NOT be in Rust tool registry");
     
     // Verify it IS a JS tool
-    assert!(bridge.is_js_tool("js_only_tool"),
-        "Should identify js_only_tool as a JavaScript tool");
+    assert!(bridge.is_js_tool("js/only"),
+        "Should identify js/only as a JavaScript tool");
     
     tracing::info!("✅ JavaScript tools correctly isolated from Rust");
 }
@@ -318,21 +334,30 @@ async fn test_js_tool_name_conflict_with_rust_tool() {
     
     // Create a Rust tool
     struct TestRustTool;
+
+    #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+    #[ts(export)]
+    struct ConflictInput {}
+
+    #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+    #[ts(export)]
+    struct ConflictOutput {
+        from: String,
+    }
     
     #[async_trait]
     impl BamlTool for TestRustTool {
-        const NAME: &'static str = "conflict_tool";
+        const NAME: &'static str = "test/conflict_tool";
+        type OpenInput = ();
+        type Input = ConflictInput;
+        type Output = ConflictOutput;
         
         fn description(&self) -> &'static str {
             "A Rust tool"
         }
         
-        fn input_schema(&self) -> serde_json::Value {
-            json!({})
-        }
-        
-        async fn execute(&self, _args: serde_json::Value) -> baml_rt::Result<serde_json::Value> {
-            Ok(json!({"from": "rust"}))
+        async fn execute(&self, _args: Self::Input) -> baml_rt::Result<Self::Output> {
+            Ok(ConflictOutput { from: "rust".to_string() })
         }
     }
     
@@ -345,7 +370,7 @@ async fn test_js_tool_name_conflict_with_rust_tool() {
     let mut bridge = setup_bridge(baml_manager.clone()).await;
     
     // Try to register a JS tool with the same name - should fail
-    let result = bridge.register_js_tool("conflict_tool", r#"
+    let result = bridge.register_js_tool("test/conflict_tool", r#"
         async function() {
             return { from: "javascript" };
         }
@@ -367,16 +392,16 @@ async fn test_register_multiple_js_tools() {
     let mut bridge = setup_bridge(baml_manager.clone()).await;
     
     // Register multiple JS tools
-    bridge.register_js_tool("tool1", r#"async function() { return { id: 1 }; }"#).await.unwrap();
-    bridge.register_js_tool("tool2", r#"async function() { return { id: 2 }; }"#).await.unwrap();
-    bridge.register_js_tool("tool3", r#"async function() { return { id: 3 }; }"#).await.unwrap();
+    bridge.register_js_tool("js/tool1", r#"async function() { return { id: 1 }; }"#).await.unwrap();
+    bridge.register_js_tool("js/tool2", r#"async function() { return { id: 2 }; }"#).await.unwrap();
+    bridge.register_js_tool("js/tool3", r#"async function() { return { id: 3 }; }"#).await.unwrap();
     
     // Verify all are listed
     let js_tools = bridge.list_js_tools();
     assert_eq!(js_tools.len(), 3, "Should have 3 JS tools");
-    assert!(js_tools.contains(&"tool1".to_string()));
-    assert!(js_tools.contains(&"tool2".to_string()));
-    assert!(js_tools.contains(&"tool3".to_string()));
+    assert!(js_tools.contains(&"js/tool1".to_string()));
+    assert!(js_tools.contains(&"js/tool2".to_string()));
+    assert!(js_tools.contains(&"js/tool3".to_string()));
     
     tracing::info!("✅ Multiple JavaScript tools registered successfully");
 }

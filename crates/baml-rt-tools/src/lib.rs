@@ -1,7 +1,31 @@
 //! Tool registry and mapping utilities.
 
-pub mod tool_mapper;
+pub mod bundles;
+pub mod tool_fsm;
+pub mod tool_schema;
 pub mod tools;
+pub mod ts_gen;
+pub mod tool_catalog;
+pub mod support;
 
-pub use tool_mapper::ToolMapper;
-pub use tools::{BamlTool, ToolExecutor, ToolMetadata, ToolRegistry};
+pub use bundles::{BundleType, Support};
+pub use tool_fsm::{ToolFailure, ToolFailureKind, ToolSession, ToolSessionError, ToolSessionId, ToolStep};
+pub use tool_schema::{json_schema_value, ts_decl, ts_name, ToolType};
+pub use tool_catalog::{ToolCatalog, InventoryCatalog};
+pub use tools::{
+    BamlTool,
+    BundleName,
+    LocalToolName,
+    ToolBundle,
+    ToolBundleMetadata,
+    ToolCapability,
+    ToolExecutor,
+    ToolFunctionMetadataExport,
+    ToolHandler,
+    ToolName,
+    ToolSessionAdvance,
+    ToolSessionHandle,
+    ToolRegistry,
+    ToolSecretRequirement,
+    ToolTypeSpec,
+};

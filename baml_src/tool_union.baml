@@ -16,12 +16,12 @@ class Expression {
 
 // Define tools as class types
 class WeatherTool {
-  tool_name "weather" @description("Use this tool to get the current weather forecast for a specific city.")
+  tool_name "support/get_weather" @description("Use this tool to get the current weather forecast for a specific city.")
   location string @description("The city and state or city and country, e.g. San Francisco, CA or London, UK")
 }
 
 class CalculatorTool {
-  tool_name "calculator" @description("Use this tool to perform mathematical calculations.")
+  tool_name "support/calculate" @description("Use this tool to perform mathematical calculations.")
   expression Expression @description("The mathematical expression to calculate")
 }
 

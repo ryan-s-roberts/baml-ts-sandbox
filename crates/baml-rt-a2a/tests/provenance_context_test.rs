@@ -12,6 +12,9 @@ use std::sync::Arc;
 use test_support::support::a2a::A2aInMemoryClient;
 use async_trait::async_trait;
 use serde_json::json;
+use serde::{Deserialize, Serialize};
+use schemars::JsonSchema;
+use ts_rs::TS;
 
 fn user_message(message_id: &str, text: &str, context_id: Option<ContextId>) -> Message {
     Message {
@@ -125,7 +128,10 @@ async fn test_context_id_is_task_local_under_concurrency() {
     let js_code = r#"
         globalThis.handle_a2a_request = async function(request) {
             const text = request?.params?.message?.parts?.[0]?.text || "";
-            return await invokeTool("echo_tool", { text });
+            const session = await openToolSession("test/echo_tool");
+            await session.send({ text });
+            const step = await session.continue();
+            return step && step.output ? step.output : {};
         };
     "#;
 
@@ -187,8 +193,8 @@ async fn test_context_id_is_task_local_under_concurrency() {
     let events = writer.events().await;
     for context_id in context_ids {
         let (starts, completes, successes) =
-            tool_event_counts(&events, "echo_tool", &context_id);
-        // Current invokeTool -> JS wrapper -> __tool_invoke path produces two tool calls per request.
+            tool_event_counts(&events, "test/echo_tool", &context_id);
+        // Session-based tool calls currently emit two tool invocations per request.
         assert_eq!(
             starts, 2,
             "expected 2 tool starts for {context_id}, got {starts}"
@@ -208,26 +214,31 @@ async fn test_context_id_is_task_local_under_concurrency() {
 #[derive(Debug)]
 struct EchoTool;
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(export)]
+struct EchoInput {
+    text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(export)]
+struct EchoOutput {
+    echo: String,
+}
+
 #[async_trait]
 impl BamlTool for EchoTool {
-    const NAME: &'static str = "echo_tool";
+    const NAME: &'static str = "test/echo_tool";
+    type OpenInput = ();
+    type Input = EchoInput;
+    type Output = EchoOutput;
 
     fn description(&self) -> &'static str {
         "Echo tool for concurrency testing."
     }
 
-    fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "text": { "type": "string" }
-            },
-            "required": ["text"]
-        })
-    }
-
-    async fn execute(&self, args: Value) -> Result<Value> {
-        Ok(json!({ "echo": args }))
+    async fn execute(&self, args: Self::Input) -> Result<Self::Output> {
+        Ok(EchoOutput { echo: args.text })
     }
 }
 

@@ -9,6 +9,7 @@ use crate::js_value_converter::value_to_js_value_facade;
 use baml_rt_core::correlation;
 use baml_rt_core::context;
 use baml_rt_core::ids::{ContextId, ExternalId, MessageId, TaskId};
+use baml_rt_tools::{ToolSessionId, ToolStep};
 use quickjs_runtime::builder::QuickJsRuntimeBuilder;
 use quickjs_runtime::facades::QuickJsRuntimeFacade;
 use quickjs_runtime::jsutils::Script;
@@ -23,6 +24,21 @@ use tokio::sync::Mutex;
 /// Helper function to serialize an ID to a JSON string for JavaScript prelude code.
 fn serialize_id(id: &impl Serialize) -> Result<String> {
     serde_json::to_string(id).map_err(BamlRtError::Json)
+}
+
+fn tool_step_to_value(step: ToolStep) -> Value {
+    match step {
+        ToolStep::Streaming { output } => json!({ "status": "streaming", "output": output }),
+        ToolStep::Done { output } => json!({ "status": "done", "output": output }),
+        ToolStep::Error { error } => json!({
+            "status": "error",
+            "error": {
+                "kind": format!("{:?}", error.kind),
+                "message": error.message,
+                "retryable": error.retryable
+            }
+        }),
+    }
 }
 
 /// Bridge between QuickJS JavaScript runtime and BAML functions
@@ -191,17 +207,11 @@ impl QuickJSBridge {
     /// Register all tool functions with QuickJS
     async fn register_tool_functions(&mut self) -> Result<()> {
         tracing::info!("Registering tool functions with QuickJS");
-        
-        let manager = self.baml_manager.lock().await;
-        let tools = manager.list_tools().await;
-        drop(manager);
-
-        for tool_name in tools {
-            self.register_single_tool(&tool_name).await?;
-        }
 
         // Register helper function to execute tools
         self.register_tool_invoke_helper().await?;
+        self.register_tool_session_helpers().await?;
+        self.register_tool_session_wrapper().await?;
 
         Ok(())
     }
@@ -404,27 +414,15 @@ impl QuickJSBridge {
             source: Box::new(e),
         })?;
 
-        // Register unified invokeTool function that dispatches to both Rust and JS tools
+        // Register invokeTool for JS tools only; host tools must use openToolSession.
         let dispatch_code = r#"
             globalThis.invokeTool = async function(toolName, args) {
-                // Normalize args to object if needed
                 const argsObj = typeof args === 'object' && args !== null ? args : { value: args };
-                
-                // Check if it's a JavaScript tool by checking if it exists as a global function
-                // (and is not one of our helper functions)
-                if (typeof globalThis[toolName] === 'function' && 
-                    toolName !== '__tool_invoke' && 
-                    toolName !== '__baml_invoke' && 
-                    toolName !== '__baml_stream' &&
-                    toolName !== '__awaitAndStringify' &&
-                    toolName !== 'invokeTool') {
-                    // JavaScript tool - call directly
-                    return await globalThis[toolName](argsObj);
-                } else {
-                    // Rust tool - use __tool_invoke
-                    const argsJson = JSON.stringify(argsObj);
-                    return await __tool_invoke(toolName, argsJson, globalThis.__baml_context_id, globalThis.__baml_message_id, globalThis.__baml_task_id);
+                const jsTools = globalThis.__js_tools || {};
+                if (typeof jsTools[toolName] === 'function') {
+                    return await jsTools[toolName](argsObj);
                 }
+                throw new Error(`Tool '${toolName}' is a host tool. Use openToolSession().`);
             };
         "#;
 
@@ -438,6 +436,251 @@ impl QuickJSBridge {
             })?;
 
         tracing::debug!("Registered __tool_invoke, __tool_from_baml_result, and invokeTool helper functions");
+        Ok(())
+    }
+
+    async fn register_tool_session_helpers(&mut self) -> Result<()> {
+        let manager_clone = self.baml_manager.clone();
+        let agent_id = self.agent_id.clone();
+
+        self.runtime.set_function(
+            &[],
+            "__tool_session_open",
+            move |_realm: &QuickJsRealmAdapter, args: Vec<JsValueFacade>| -> std::result::Result<JsValueFacade, quickjs_runtime::jsutils::JsError> {
+                if args.is_empty() {
+                    return Err(quickjs_runtime::jsutils::JsError::new_str("Expected 1 argument: tool_name"));
+                }
+
+                let tool_name_js = &args[0];
+                let tool_name = if tool_name_js.is_string() {
+                    tool_name_js.get_str().to_string()
+                } else {
+                    return Err(quickjs_runtime::jsutils::JsError::new_str("First argument must be a string (tool name)"));
+                };
+
+                let context_id_arg = args.get(1).and_then(|value| {
+                    if value.is_string() {
+                        ContextId::parse_temporal(value.get_str())
+                    } else {
+                        None
+                    }
+                });
+                let message_id_arg = args.get(2).and_then(|value| {
+                    if value.is_string() {
+                        Some(MessageId::from_external(ExternalId::new(value.get_str())))
+                    } else {
+                        None
+                    }
+                });
+                let task_id_arg = args.get(3).and_then(|value| {
+                    if value.is_string() {
+                        Some(TaskId::from_external(ExternalId::new(value.get_str())))
+                    } else {
+                        None
+                    }
+                });
+
+                let manager_for_promise = manager_clone.clone();
+                let correlation_id = correlation::current_or_new();
+                let context_id = context_id_arg.unwrap_or_else(context::current_or_new);
+                let scope = context::RuntimeScope::new(context_id, agent_id.clone(), message_id_arg, task_id_arg);
+
+                Ok(JsValueFacade::new_promise::<JsValueFacade, _, ()>(async move {
+                    correlation::with_correlation_id(correlation_id, async move {
+                        context::with_scope(scope, async move {
+                            let manager = manager_for_promise.lock().await;
+                            let session_id = manager.open_tool_session(&tool_name).await;
+                            match session_id {
+                                Ok(id) => Ok(JsValueFacade::new_string(id.as_str().to_string())),
+                                Err(e) => Err(quickjs_runtime::jsutils::JsError::new_str(&format!("Tool session open error: {}", e))),
+                            }
+                        })
+                        .await
+                    })
+                    .await
+                }))
+            },
+        ).map_err(|e| BamlRtError::QuickJsWithSource {
+            context: "Failed to register __tool_session_open".to_string(),
+            source: Box::new(e),
+        })?;
+
+        let manager_clone = self.baml_manager.clone();
+        self.runtime.set_function(
+            &[],
+            "__tool_session_send",
+            move |_realm: &QuickJsRealmAdapter, args: Vec<JsValueFacade>| -> std::result::Result<JsValueFacade, quickjs_runtime::jsutils::JsError> {
+                if args.len() < 2 {
+                    return Err(quickjs_runtime::jsutils::JsError::new_str("Expected 2 arguments: session_id and args"));
+                }
+                let session_id = if args[0].is_string() {
+                    ToolSessionId::new(args[0].get_str())
+                        .map_err(|e| quickjs_runtime::jsutils::JsError::new_str(&e.to_string()))?
+                } else {
+                    return Err(quickjs_runtime::jsutils::JsError::new_str("First argument must be a string (session id)"));
+                };
+                let args_json_str = if args[1].is_string() {
+                    args[1].get_str().to_string()
+                } else {
+                    return Err(quickjs_runtime::jsutils::JsError::new_str("Args must be a JSON string"));
+                };
+                let args_json: Value = serde_json::from_str(&args_json_str)
+                    .map_err(|e| quickjs_runtime::jsutils::JsError::new_str(&format!("Failed to parse JSON args: {}", e)))?;
+
+                let manager_for_promise = manager_clone.clone();
+                Ok(JsValueFacade::new_promise::<JsValueFacade, _, ()>(async move {
+                    let manager = manager_for_promise.lock().await;
+                    let result = manager.tool_session_send(&session_id, args_json).await;
+                    match result {
+                        Ok(_) => Ok(value_to_js_value_facade(Value::Null)),
+                        Err(e) => Err(quickjs_runtime::jsutils::JsError::new_str(&format!("Tool session send error: {}", e))),
+                    }
+                }))
+            },
+        ).map_err(|e| BamlRtError::QuickJsWithSource {
+            context: "Failed to register __tool_session_send".to_string(),
+            source: Box::new(e),
+        })?;
+
+        let manager_clone = self.baml_manager.clone();
+        self.runtime.set_function(
+            &[],
+            "__tool_session_next",
+            move |_realm: &QuickJsRealmAdapter, args: Vec<JsValueFacade>| -> std::result::Result<JsValueFacade, quickjs_runtime::jsutils::JsError> {
+                if args.is_empty() {
+                    return Err(quickjs_runtime::jsutils::JsError::new_str("Expected 1 argument: session_id"));
+                }
+                let session_id = if args[0].is_string() {
+                    ToolSessionId::new(args[0].get_str())
+                        .map_err(|e| quickjs_runtime::jsutils::JsError::new_str(&e.to_string()))?
+                } else {
+                    return Err(quickjs_runtime::jsutils::JsError::new_str("First argument must be a string (session id)"));
+                };
+                let manager_for_promise = manager_clone.clone();
+                Ok(JsValueFacade::new_promise::<JsValueFacade, _, ()>(async move {
+                    let manager = manager_for_promise.lock().await;
+                    let result = manager.tool_session_next(&session_id).await;
+                    match result {
+                        Ok(step) => {
+                            let value = tool_step_to_value(step);
+                            Ok(value_to_js_value_facade(value))
+                        }
+                        Err(e) => Err(quickjs_runtime::jsutils::JsError::new_str(&format!("Tool session next error: {}", e))),
+                    }
+                }))
+            },
+        ).map_err(|e| BamlRtError::QuickJsWithSource {
+            context: "Failed to register __tool_session_next".to_string(),
+            source: Box::new(e),
+        })?;
+
+        let manager_clone = self.baml_manager.clone();
+        self.runtime.set_function(
+            &[],
+            "__tool_session_finish",
+            move |_realm: &QuickJsRealmAdapter, args: Vec<JsValueFacade>| -> std::result::Result<JsValueFacade, quickjs_runtime::jsutils::JsError> {
+                if args.is_empty() {
+                    return Err(quickjs_runtime::jsutils::JsError::new_str("Expected 1 argument: session_id"));
+                }
+                let session_id = if args[0].is_string() {
+                    ToolSessionId::new(args[0].get_str())
+                        .map_err(|e| quickjs_runtime::jsutils::JsError::new_str(&e.to_string()))?
+                } else {
+                    return Err(quickjs_runtime::jsutils::JsError::new_str("First argument must be a string (session id)"));
+                };
+                let manager_for_promise = manager_clone.clone();
+                Ok(JsValueFacade::new_promise::<JsValueFacade, _, ()>(async move {
+                    let manager = manager_for_promise.lock().await;
+                    let result = manager.tool_session_finish(&session_id).await;
+                    match result {
+                        Ok(_) => Ok(value_to_js_value_facade(Value::Null)),
+                        Err(e) => Err(quickjs_runtime::jsutils::JsError::new_str(&format!("Tool session finish error: {}", e))),
+                    }
+                }))
+            },
+        ).map_err(|e| BamlRtError::QuickJsWithSource {
+            context: "Failed to register __tool_session_finish".to_string(),
+            source: Box::new(e),
+        })?;
+
+        let manager_clone = self.baml_manager.clone();
+        self.runtime.set_function(
+            &[],
+            "__tool_session_abort",
+            move |_realm: &QuickJsRealmAdapter, args: Vec<JsValueFacade>| -> std::result::Result<JsValueFacade, quickjs_runtime::jsutils::JsError> {
+                if args.is_empty() {
+                    return Err(quickjs_runtime::jsutils::JsError::new_str("Expected 1 argument: session_id"));
+                }
+                let session_id = if args[0].is_string() {
+                    ToolSessionId::new(args[0].get_str())
+                        .map_err(|e| quickjs_runtime::jsutils::JsError::new_str(&e.to_string()))?
+                } else {
+                    return Err(quickjs_runtime::jsutils::JsError::new_str("First argument must be a string (session id)"));
+                };
+                let reason = args.get(1).and_then(|value| {
+                    if value.is_string() {
+                        Some(value.get_str().to_string())
+                    } else {
+                        None
+                    }
+                });
+                let manager_for_promise = manager_clone.clone();
+                Ok(JsValueFacade::new_promise::<JsValueFacade, _, ()>(async move {
+                    let manager = manager_for_promise.lock().await;
+                    let result = manager.tool_session_abort(&session_id, reason).await;
+                    match result {
+                        Ok(_) => Ok(value_to_js_value_facade(Value::Null)),
+                        Err(e) => Err(quickjs_runtime::jsutils::JsError::new_str(&format!("Tool session abort error: {}", e))),
+                    }
+                }))
+            },
+        ).map_err(|e| BamlRtError::QuickJsWithSource {
+            context: "Failed to register __tool_session_abort".to_string(),
+            source: Box::new(e),
+        })?;
+
+        tracing::debug!("Registered tool session helper functions");
+        Ok(())
+    }
+
+    async fn register_tool_session_wrapper(&mut self) -> Result<()> {
+        let js_code = r#"
+        globalThis.openToolSession = async function(toolName) {
+            const sessionId = await __tool_session_open(
+                toolName,
+                globalThis.__baml_context_id,
+                globalThis.__baml_message_id,
+                globalThis.__baml_task_id
+            );
+            return {
+                sessionId,
+                send: async function(args) {
+                    const argObj = args ?? {};
+                    return await __tool_session_send(sessionId, JSON.stringify(argObj));
+                },
+                continue: async function() {
+                    return await __tool_session_next(sessionId);
+                },
+                finish: async function() {
+                    return await __tool_session_finish(sessionId);
+                },
+                abort: async function(reason) {
+                    return await __tool_session_abort(sessionId, reason);
+                }
+            };
+        };
+        "#;
+
+        let script = Script::new("register_tool_session_wrapper.js", js_code);
+        self.runtime
+            .eval(None, script)
+            .await
+            .map_err(|e| BamlRtError::QuickJsWithSource {
+                context: "Failed to register tool session wrapper".to_string(),
+                source: Box::new(e),
+            })?;
+
+        tracing::debug!("Registered openToolSession wrapper");
         Ok(())
     }
 
@@ -519,7 +762,8 @@ impl QuickJSBridge {
                         // Execute the BAML function asynchronously
                         let manager = manager_for_promise.lock().await;
                         let result = context::with_scope(scope, async move {
-                            manager.invoke_function(&func_name_clone, args_json).await
+                            let value = manager.invoke_function(&func_name_clone, args_json).await?;
+                            manager.execute_tool_from_baml_result_or_value(value).await
                         })
                         .await;
 
@@ -588,7 +832,7 @@ impl QuickJSBridge {
     /// They are NOT available to Rust - they only exist in the JavaScript context.
     /// 
     /// # Arguments
-    /// * `name` - The name of the tool (will be available as `globalThis.<name>`)
+    /// * `name` - The name of the tool (stored under globalThis.__js_tools[name])
     /// * `js_function_code` - JavaScript function code (should be a complete function definition)
     /// 
     /// # Example
@@ -613,7 +857,7 @@ impl QuickJSBridge {
     /// 
     /// The tool will be available in JavaScript as:
     /// ```javascript
-    /// const result = await greet_js("World");
+    /// const result = await invokeTool("interface/tool", { name: "World" });
     /// ```
     pub async fn register_js_tool(
         &mut self,
@@ -622,6 +866,13 @@ impl QuickJSBridge {
     ) -> Result<()> {
         let tool_name = name.into();
         let function_code = js_function_code.as_ref();
+
+        if tool_name.split('/').count() != 2 {
+            return Err(BamlRtError::InvalidArgument(format!(
+                "JavaScript tool name '{}' must be formatted as interface/tool",
+                tool_name
+            )));
+        }
 
         // Check if tool name conflicts with existing Rust tools
         {
@@ -646,7 +897,8 @@ impl QuickJSBridge {
         // Register the JavaScript function in the QuickJS runtime
         let js_code = format!(
             r#"
-            globalThis.{} = {};
+            globalThis.__js_tools = globalThis.__js_tools || {{}};
+            globalThis.__js_tools["{}"] = {};
             "#,
             tool_name, function_code
         );
@@ -1249,7 +1501,7 @@ impl QuickJSBridge {
                 try {{
                     {}
                     const args = {};
-                    const func = globalThis["{}"];
+                    const func = globalThis.__js_tools && globalThis.__js_tools["{}"];
                     if (func === undefined || typeof func !== 'function') {{
                         return JSON.stringify({{ error: "JS tool not found" }});
                     }}

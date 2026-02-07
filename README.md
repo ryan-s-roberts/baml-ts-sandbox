@@ -9,7 +9,7 @@ the `baml-rt` facade crate, which re-exports feature-gated subcrates.
 ### Crate Map (Bottom-Up)
 
 - `baml-rt-core`: Core errors/results, correlation helpers, and shared types.
-- `baml-rt-tools`: Tool traits, registry/executor, and mapping utilities.
+- `baml-rt-tools`: Tool traits, registry/executor, and session FSM primitives.
 - `baml-rt-interceptor`: Interceptor traits, pipelines, and tracing interceptors.
 - `baml-rt-observability`: Tracing setup, spans, and metrics helpers.
 - `baml-rt-quickjs`: QuickJS runtime host, schema loading, JS bridge, and context.
@@ -43,7 +43,7 @@ sequenceDiagram
         BR-->>LLM: provider request
         LLM-->>BR: response
         BR-->>BRM: result
-        BRM->>TR: tool execution (if any)
+    BRM->>TR: tool session execution (if any)
         BRM->>INT: post-execution interceptors
         BRM-->>QJS: result
     end
@@ -98,6 +98,13 @@ The `baml-rt` crate exposes feature-gated modules:
 
 Default features enable all of the above.
 
+## BAML ↔ Host Tool Contract
+
+Host tools are **session-based**. BAML returns a declarative `ToolSessionPlan`
+that describes FSM steps (`Open`, `Send`, `Next`, `Finish`, `Abort`), and the
+runtime executes those steps **in Rust**. JavaScript never mediates host tool
+execution; JS only handles JS tools via `invokeTool`.
+
 ## Binaries
 
 - `baml-agent-builder` (from `baml-rt-builder`): Lint, compile, and package agents.
@@ -105,7 +112,7 @@ Default features enable all of the above.
 
 ## Repository Layout
 
-```
+```text
 baml-rt/
 ├── crates/
 ├── baml_src/        # Example BAML schemas

@@ -4,6 +4,9 @@ use baml_rt::tools::BamlTool;
 use baml_rt::baml::BamlRuntimeManager;
 use baml_rt::{A2aAgent, A2aRequestHandler};
 use serde_json::{json, Value};
+use serde::{Deserialize, Serialize};
+use schemars::JsonSchema;
+use ts_rs::TS;
 use std::collections::HashMap;
 use test_support::common::CalculatorTool;
 
@@ -30,7 +33,10 @@ fn fixture_js_code() -> String {
                 };
             }
             if (text.startsWith("tool-call:")) {
-                const result = await invokeTool("add_numbers", { a: 2, b: 3 });
+                const session = await openToolSession("test/add_numbers");
+                await session.send({ a: 2, b: 3 });
+                const step = await session.continue();
+                const result = step && step.output ? step.output : {};
                 return {
                     message: {
                         messageId: `resp-${messageId}`,
@@ -40,7 +46,10 @@ fn fixture_js_code() -> String {
                 };
             }
             if (text.startsWith("baml-tool:")) {
-                const result = await invokeTool("calculate", { expression: { left: 2, operation: "Add", right: 3 } });
+                const session = await openToolSession("support/calculate");
+                await session.send({ expression: { left: 2, operation: "Add", right: 3 } });
+                const step = await session.continue();
+                const result = step && step.output ? step.output : {};
                 return {
                     message: {
                         messageId: `resp-${messageId}`,
@@ -106,7 +115,6 @@ fn user_message(message_id: &str, text: &str) -> Message {
 
 async fn setup_agent() -> A2aAgent {
     let mut manager = BamlRuntimeManager::new().unwrap();
-    manager.map_baml_variant_to_tool("CalculatorTool", "calculate");
     A2aAgent::builder()
         .with_runtime_manager(manager)
         .with_init_js(fixture_js_code())
@@ -258,30 +266,32 @@ async fn test_tasks_subscribe_streams_incremental_updates() {
 
 struct AddNumbersTool;
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(export)]
+struct AddNumbersInput {
+    a: f64,
+    b: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(export)]
+struct AddNumbersOutput {
+    result: f64,
+}
+
 #[async_trait]
 impl BamlTool for AddNumbersTool {
-    const NAME: &'static str = "add_numbers";
+    const NAME: &'static str = "test/add_numbers";
+    type OpenInput = ();
+    type Input = AddNumbersInput;
+    type Output = AddNumbersOutput;
 
     fn description(&self) -> &'static str {
         "Adds two numbers together"
     }
 
-    fn input_schema(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "a": {"type": "number"},
-                "b": {"type": "number"}
-            },
-            "required": ["a", "b"]
-        })
-    }
-
-    async fn execute(&self, args: serde_json::Value) -> baml_rt::Result<serde_json::Value> {
-        let obj = args.as_object().expect("Expected object");
-        let a = obj.get("a").and_then(|v| v.as_f64()).expect("Expected 'a' number");
-        let b = obj.get("b").and_then(|v| v.as_f64()).expect("Expected 'b' number");
-        Ok(json!({ "result": a + b }))
+    async fn execute(&self, args: Self::Input) -> baml_rt::Result<Self::Output> {
+        Ok(AddNumbersOutput { result: args.a + args.b })
     }
 }
 
@@ -335,7 +345,6 @@ async fn test_message_send_baml_tool_calling() {
         let runtime = agent.runtime();
         let mut manager = runtime.lock().await;
         manager.register_tool(CalculatorTool).await.unwrap();
-        manager.map_baml_variant_to_tool("RiteCalcTool", "calculate");
     }
 
     let params = SendMessageRequest {

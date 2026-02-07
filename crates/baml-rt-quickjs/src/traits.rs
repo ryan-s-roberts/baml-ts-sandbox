@@ -9,7 +9,7 @@
 //! - Managing tool registries
 
 use baml_rt_core::Result;
-use baml_rt_tools::BamlTool;
+use baml_rt_tools::{BamlTool, ToolSessionId, ToolStep};
 use serde_json::Value;
 use async_trait::async_trait;
 use crate::quickjs_bridge::QuickJSBridge;
@@ -49,6 +49,12 @@ pub trait ToolRegistryTrait: Send + Sync {
     
     /// List all registered tool names
     async fn list_tools(&self) -> Vec<String>;
+
+    async fn open_tool_session(&self, tool_name: &str) -> Result<ToolSessionId>;
+    async fn tool_session_send(&self, session_id: &ToolSessionId, input: Value) -> Result<()>;
+    async fn tool_session_next(&self, session_id: &ToolSessionId) -> Result<ToolStep>;
+    async fn tool_session_finish(&self, session_id: &ToolSessionId) -> Result<()>;
+    async fn tool_session_abort(&self, session_id: &ToolSessionId, reason: Option<String>) -> Result<()>;
 }
 
 /// Trait for hosting JavaScript runtime evaluation.

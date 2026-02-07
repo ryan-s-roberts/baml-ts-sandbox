@@ -5,7 +5,7 @@
 
 use baml_rt_core::{BamlRtError, Result};
 use baml_rt_core::context;
-use baml_rt_tools::{ToolMapper, ToolRegistry};
+use baml_rt_tools::ToolRegistry;
 use baml_rt_interceptor::{InterceptorDecision, InterceptorRegistry};
 use crate::baml_collector::BamlLLMCollector;
 use crate::baml_pre_execution::intercept_llm_call_pre_execution;
@@ -14,7 +14,7 @@ use baml_types::BamlValue;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
 
@@ -22,7 +22,6 @@ use tokio::sync::Mutex;
 pub struct BamlExecutor {
     runtime: Arc<BamlRuntime>,
     tool_registry: Arc<Mutex<ToolRegistry>>,
-    tool_mapper: Arc<StdMutex<ToolMapper>>,
 }
 
 impl BamlExecutor {
@@ -32,7 +31,6 @@ impl BamlExecutor {
     pub fn load_il(
         baml_src_dir: &Path,
         tool_registry: Arc<Mutex<ToolRegistry>>,
-        tool_mapper: Arc<StdMutex<ToolMapper>>,
     ) -> Result<Self> {
         tracing::info!(?baml_src_dir, "Loading BAML runtime from directory");
 
@@ -64,7 +62,6 @@ impl BamlExecutor {
         Ok(Self {
             runtime: Arc::new(runtime),
             tool_registry,
-            tool_mapper,
         })
     }
 
@@ -187,8 +184,7 @@ impl BamlExecutor {
         }
 
         if let Some(tool_result) =
-            maybe_execute_tool_from_result(&self.tool_registry, &self.tool_mapper, &json_value)
-                .await?
+            maybe_execute_tool_from_result(&self.tool_registry, &json_value).await?
         {
             return Ok(tool_result);
         }
@@ -320,21 +316,57 @@ impl BamlExecutor {
 
 async fn maybe_execute_tool_from_result(
     tool_registry: &Arc<Mutex<ToolRegistry>>,
-    tool_mapper: &Arc<StdMutex<ToolMapper>>,
     result: &Value,
 ) -> Result<Option<Value>> {
-    let tool_call = tool_mapper
-        .lock()
-        .map_err(|_| BamlRtError::InvalidArgument("Tool mapper lock poisoned".to_string()))?
-        .extract_explicit_tool_call(result)?;
-
-    let Some((tool_name, tool_args)) = tool_call else {
+    let Some((tool_name, tool_args)) = extract_tool_call(result)? else {
         return Ok(None);
     };
 
-    let registry = tool_registry.lock().await;
+    let mut registry = tool_registry.lock().await;
     let tool_result = registry.execute(&tool_name, tool_args).await?;
     Ok(Some(tool_result))
+}
+
+fn extract_tool_call(result: &Value) -> Result<Option<(String, Value)>> {
+    let obj = match result.as_object() {
+        Some(obj) => obj,
+        None => return Ok(None),
+    };
+
+    if let Some(tool_name) = obj.get("tool_name") {
+        return Ok(Some(parse_tool_call_object(obj, tool_name)?));
+    }
+
+    if obj.len() == 1 {
+        let (_, value) = obj.iter().next().ok_or_else(|| {
+            BamlRtError::InvalidArgument("Expected non-empty tool object".to_string())
+        })?;
+        if let Some(inner) = value.as_object() {
+            if let Some(tool_name) = inner.get("tool_name") {
+                return Ok(Some(parse_tool_call_object(inner, tool_name)?));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+fn parse_tool_call_object(
+    obj: &serde_json::Map<String, Value>,
+    tool_name_value: &Value,
+) -> Result<(String, Value)> {
+    let tool_name = tool_name_value.as_str().ok_or_else(|| {
+        BamlRtError::InvalidArgument("tool_name must be a string".to_string())
+    })?;
+
+    let mut tool_args = serde_json::Map::new();
+    for (key, value) in obj {
+        if key != "tool_name" && key != "__type" {
+            tool_args.insert(key.clone(), value.clone());
+        }
+    }
+
+    Ok((tool_name.to_string(), Value::Object(tool_args)))
 }
 
 #[cfg(test)]
@@ -343,29 +375,40 @@ mod tests {
     use baml_rt_tools::BamlTool;
     use async_trait::async_trait;
     use serde_json::json;
+    use serde::{Deserialize, Serialize};
+    use schemars::JsonSchema;
+    use ts_rs::TS;
 
     struct EchoTool;
 
+    #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+    #[ts(export)]
+    struct EchoInput {
+        message: String,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+    #[ts(export)]
+    struct EchoOutput {
+        #[ts(type = "any")]
+        echo: serde_json::Value,
+    }
+
     #[async_trait]
     impl BamlTool for EchoTool {
-        const NAME: &'static str = "echo_tool";
+        const NAME: &'static str = "test/echo_tool";
+        type OpenInput = ();
+        type Input = EchoInput;
+        type Output = EchoOutput;
 
         fn description(&self) -> &'static str {
             "Echoes the input payload."
         }
 
-        fn input_schema(&self) -> Value {
-            json!({
-                "type": "object",
-                "properties": {
-                    "message": { "type": "string" }
-                },
-                "required": ["message"]
+        async fn execute(&self, args: Self::Input) -> Result<Self::Output> {
+            Ok(EchoOutput {
+                echo: json!({ "message": args.message }),
             })
-        }
-
-        async fn execute(&self, args: Value) -> Result<Value> {
-            Ok(json!({ "echo": args }))
         }
     }
 
@@ -374,19 +417,13 @@ mod tests {
         let registry = Arc::new(Mutex::new(ToolRegistry::new()));
         registry.lock().await.register(EchoTool).unwrap();
 
-        let mapper = Arc::new(StdMutex::new(ToolMapper::new()));
-        mapper
-            .lock()
-            .unwrap()
-            .register_mapping("EchoTool", "echo_tool");
-
         let result = json!({
-            "__type": "EchoTool",
+            "tool_name": "test/echo_tool",
             "message": "hello"
         });
 
         let tool_result =
-            maybe_execute_tool_from_result(&registry, &mapper, &result)
+            maybe_execute_tool_from_result(&registry, &result)
                 .await
                 .unwrap()
                 .expect("expected tool execution");
@@ -397,11 +434,9 @@ mod tests {
     #[tokio::test]
     async fn leaves_non_tool_results_untouched() {
         let registry = Arc::new(Mutex::new(ToolRegistry::new()));
-        let mapper = Arc::new(StdMutex::new(ToolMapper::new()));
-
         let result = json!({ "value": "not a tool" });
         let tool_result =
-            maybe_execute_tool_from_result(&registry, &mapper, &result)
+            maybe_execute_tool_from_result(&registry, &result)
                 .await
                 .unwrap();
 

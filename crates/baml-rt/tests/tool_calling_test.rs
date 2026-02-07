@@ -3,6 +3,9 @@
 use async_trait::async_trait;
 use baml_rt::tools::BamlTool;
 use serde_json::json;
+use serde::{Deserialize, Serialize};
+use schemars::JsonSchema;
+use ts_rs::TS;
 
 use test_support::common::{
     WeatherTool,
@@ -32,20 +35,20 @@ async fn test_llm_tool_calling_rust() {
         let manager = baml_manager.lock().await;
         
         // Test weather tool
-        let weather_result = manager.execute_tool("get_weather", json!({"location": "San Francisco"})).await.unwrap();
+        let weather_result = manager.execute_tool("support/get_weather", json!({"location": "San Francisco"})).await.unwrap();
         let weather_obj = weather_result.as_object().expect("Expected object");
         assert!(weather_obj.contains_key("temperature"), "Weather result should contain temperature");
         
         // Test calculator tool
-        let calc_result = manager.execute_tool("calculate", json!({"expression": {"left": 2, "operation": "Add", "right": 2}})).await.unwrap();
+        let calc_result = manager.execute_tool("support/calculate", json!({"expression": {"left": 2, "operation": "Add", "right": 2}})).await.unwrap();
         let calc_obj = calc_result.as_object().expect("Expected object");
         let result = calc_obj.get("result").and_then(|v| v.as_f64()).unwrap();
         assert_eq!(result, 4.0, "2 + 2 should equal 4");
         
         // List tools
         let tools = manager.list_tools().await;
-        assert!(tools.contains(&"get_weather".to_string()), "Should list weather tool");
-        assert!(tools.contains(&"calculate".to_string()), "Should list calculator tool");
+        assert!(tools.contains(&"support/get_weather".to_string()), "Should list weather tool");
+        assert!(tools.contains(&"support/calculate".to_string()), "Should list calculator tool");
     }
     
     tracing::info!("Tool registration and execution tests passed");
@@ -62,30 +65,37 @@ async fn test_llm_tool_calling_js() {
     
     // Register a tool using the trait
     struct ReverseStringTool;
+
+    #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+    #[ts(export)]
+    struct ReverseInput {
+        text: String,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+    #[ts(export)]
+    struct ReverseOutput {
+        reversed: String,
+        original: String,
+    }
     
     #[async_trait]
     impl BamlTool for ReverseStringTool {
-        const NAME: &'static str = "reverse_string";
+        const NAME: &'static str = "test/reverse_string";
+        type OpenInput = ();
+        type Input = ReverseInput;
+        type Output = ReverseOutput;
         
         fn description(&self) -> &'static str {
             "Reverses a string"
         }
         
-        fn input_schema(&self) -> serde_json::Value {
-            json!({
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string", "description": "Text to reverse"}
-                },
-                "required": ["text"]
+        async fn execute(&self, args: Self::Input) -> baml_rt::Result<Self::Output> {
+            let reversed: String = args.text.chars().rev().collect();
+            Ok(ReverseOutput {
+                reversed,
+                original: args.text,
             })
-        }
-        
-        async fn execute(&self, args: serde_json::Value) -> baml_rt::Result<serde_json::Value> {
-            let obj = args.as_object().expect("Expected object");
-            let text = obj.get("text").and_then(|v| v.as_str()).expect("Expected 'text' string");
-            let reversed: String = text.chars().rev().collect();
-            Ok(json!({"reversed": reversed, "original": text}))
         }
     }
     
@@ -96,12 +106,12 @@ async fn test_llm_tool_calling_js() {
     
     let mut bridge = setup_bridge(baml_manager.clone()).await;
     
-    assert_tool_registered_in_js(&mut bridge, "reverse_string").await;
+    assert_tool_registered_in_js(&mut bridge, "test/reverse_string").await;
     
     // Test executing the tool from Rust
     {
         let manager = baml_manager.lock().await;
-        let result = manager.execute_tool("reverse_string", json!({"text": "hello"})).await.unwrap();
+        let result = manager.execute_tool("test/reverse_string", json!({"text": "hello"})).await.unwrap();
         
         let result_obj = result.as_object().expect("Expected object");
         let reversed = result_obj.get("reversed").and_then(|g| g.as_str()).unwrap();
@@ -121,8 +131,6 @@ async fn test_e2e_baml_union_tool_calling() {
         let mut manager = baml_manager.lock().await;
         manager.register_tool(WeatherTool).await.unwrap();
         manager.register_tool(CalculatorTool).await.unwrap();
-        manager.map_baml_variant_to_tool("WeatherTool", "get_weather");
-        manager.map_baml_variant_to_tool("CalculatorTool", "calculate");
     }
     
     // Test 1: Weather tool via BAML union
@@ -196,8 +204,6 @@ async fn test_e2e_voidship_baml_tool_calling() {
     {
         let mut manager = baml_manager.lock().await;
         manager.register_tool(CalculatorTool).await.unwrap();
-        manager.map_baml_variant_to_tool("RiteCalcTool", "calculate");
-        manager.map_baml_variant_to_tool("CalculatorTool", "calculate");
     }
 
     let result = {

@@ -20,13 +20,17 @@ use baml_rt_core::{BamlRtError, Result};
 use baml_rt_core::correlation;
 use baml_rt_core::context;
 use baml_rt_observability::{metrics, spans};
-use baml_rt_tools::{ToolExecutor, ToolMetadata};
+use baml_rt_tools::tools::ToolFunctionMetadata;
+use baml_rt_tools::{ToolHandler, ToolName, ToolSession, ToolTypeSpec};
+use baml_rt_tools::tools::ToolSessionContext;
+use baml_rt_tools::{ToolFailure, ToolSessionError};
 use baml_rt_provenance::{InMemoryProvenanceStore, ProvenanceInterceptor, ProvenanceWriter};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::sync::Mutex;
+use crate::tools::A2aSessionBundle;
 
 /// Top-level agent type that owns runtime, JS bridge, and A2A comms.
 #[derive(Clone)]
@@ -95,20 +99,41 @@ impl A2aAgent {
         js_function_code: impl AsRef<str>,
     ) -> Result<()> {
         let name = name.into();
+        let parsed = ToolName::parse(&name)?;
         {
             let mut bridge = self.bridge.lock().await;
             bridge.register_js_tool(&name, js_function_code).await?;
         }
 
-        let metadata = ToolMetadata {
-            name: name.clone(),
+        let class_name = ToolFunctionMetadata::derive_class_name(parsed.bundle(), parsed.local());
+        let metadata = ToolFunctionMetadata {
+            name: parsed.clone(),
+            class_name,
             description: description.into(),
+            open_input_schema: serde_json::json!({}),
             input_schema,
+            output_schema: Value::Null,
+            open_input_type: ToolTypeSpec {
+                name: "()".to_string(),
+                ts_decl: None,
+            },
+            input_type: ToolTypeSpec {
+                name: format!("{}Input", parsed.local().as_str()),
+                ts_decl: None,
+            },
+            output_type: ToolTypeSpec {
+                name: format!("{}Output", parsed.local().as_str()),
+                ts_decl: None,
+            },
+            tags: Vec::new(),
+            secret_requirements: Vec::new(),
+            is_host_tool: false,
         };
 
-        let executor: Arc<dyn ToolExecutor> = Arc::new(JsToolExecutor {
+        let handler: Arc<dyn ToolHandler> = Arc::new(JsToolHandler {
             bridge: self.bridge.clone(),
             tool_name: name,
+            metadata: metadata.clone(),
         });
 
         let registry = {
@@ -116,8 +141,19 @@ impl A2aAgent {
             runtime.tool_registry()
         };
         let mut registry = registry.lock().await;
-        registry.register_dynamic(metadata, executor)?;
+        registry.register_dynamic(metadata, handler)?;
 
+        Ok(())
+    }
+
+    pub async fn register_a2a_session_tool(&self) -> Result<()> {
+        let bundle = A2aSessionBundle::new(Arc::new(self.clone()));
+        let registry = {
+            let runtime = self.runtime.lock().await;
+            runtime.tool_registry()
+        };
+        let mut registry = registry.lock().await;
+        registry.register_bundle(bundle)?;
         Ok(())
     }
 }
@@ -132,6 +168,7 @@ pub struct A2aAgentBuilder {
     task_store: Option<Arc<dyn TaskStoreBackend>>,
     provenance_writer: Option<Arc<dyn ProvenanceWriter>>,
     agent_id: Option<baml_rt_core::ids::AgentId>,
+    register_a2a_session_tool: bool,
 }
 
 impl Default for A2aAgentBuilder {
@@ -152,6 +189,7 @@ impl A2aAgentBuilder {
             task_store: None,
             provenance_writer: None,
             agent_id: None, // Will be generated in build()
+            register_a2a_session_tool: false,
         }
     }
 
@@ -200,6 +238,11 @@ impl A2aAgentBuilder {
     /// Provide a custom provenance writer.
     pub fn with_provenance_writer(mut self, writer: Arc<dyn ProvenanceWriter>) -> Self {
         self.provenance_writer = Some(writer);
+        self
+    }
+
+    pub fn with_a2a_session_tool(mut self, enabled: bool) -> Self {
+        self.register_a2a_session_tool = enabled;
         self
     }
 
@@ -295,7 +338,7 @@ impl A2aAgentBuilder {
                 .register_tool_interceptor(ProvenanceInterceptor::new(writer))
                 .await;
         }
-        Ok(A2aAgent {
+        let agent = A2aAgent {
             agent_id,
             runtime,
             bridge,
@@ -305,7 +348,18 @@ impl A2aAgentBuilder {
             request_router,
             error_classifier,
             update_tx,
-        })
+        };
+
+        if self.register_a2a_session_tool {
+            agent.register_a2a_session_tool().await?;
+        }
+
+        {
+            let runtime_guard = agent.runtime.lock().await;
+            runtime_guard.validate_tool_allowlist_registered().await?;
+        }
+
+        Ok(agent)
     }
 }
 
@@ -414,32 +468,92 @@ impl A2aAgent {
     // Result storage is handled by ResultStoragePipeline.
 }
 
-struct JsToolExecutor {
+struct JsToolHandler {
     bridge: Arc<Mutex<QuickJSBridge>>,
     tool_name: String,
+    metadata: ToolFunctionMetadata,
 }
 
 #[async_trait]
-impl ToolExecutor for JsToolExecutor {
-    async fn execute(&self, args: Value) -> Result<Value> {
+impl ToolHandler for JsToolHandler {
+    fn metadata(&self) -> &ToolFunctionMetadata {
+        &self.metadata
+    }
+
+    async fn open_session(&self, ctx: ToolSessionContext) -> Result<Box<dyn ToolSession>> {
+        Ok(Box::new(JsToolSession {
+            ctx,
+            bridge: self.bridge.clone(),
+            tool_name: self.tool_name.clone(),
+            input: None,
+            completed: false,
+        }))
+    }
+}
+
+struct JsToolSession {
+    ctx: ToolSessionContext,
+    bridge: Arc<Mutex<QuickJSBridge>>,
+    tool_name: String,
+    input: Option<Value>,
+    completed: bool,
+}
+
+#[async_trait]
+impl ToolSession for JsToolSession {
+    async fn send(&mut self, input: Value) -> std::result::Result<(), ToolSessionError> {
+        if self.input.is_some() {
+            return Err(ToolSessionError::Tool(ToolFailure::invalid_input(
+                "JS tool session already has input",
+            )));
+        }
+        self.input = Some(input);
+        Ok(())
+    }
+
+    async fn next(&mut self) -> std::result::Result<baml_rt_tools::ToolStep, ToolSessionError> {
+        if self.completed {
+            return Ok(baml_rt_tools::ToolStep::Done { output: None });
+        }
+        let input = self.input.take().ok_or_else(|| {
+            ToolSessionError::Tool(ToolFailure::invalid_input(format!(
+                "JS tool session {} has no input",
+                self.ctx.session_id
+            )))
+        })?;
         let bridge = self.bridge.clone();
         let tool_name = self.tool_name.clone();
         let handle = tokio::runtime::Handle::current();
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             handle.block_on(async move {
                 let mut bridge = bridge.lock().await;
-                let result = bridge.invoke_js_tool(&tool_name, args).await?;
-                if let Some(error) = result.get("error").and_then(Value::as_str) {
-                    return Err(BamlRtError::QuickJs(error.to_string()));
-                }
-                Ok(result)
+                bridge.invoke_js_tool(&tool_name, input).await
             })
         })
         .await
-        .map_err(|err| BamlRtError::QuickJsWithSource {
+        .map_err(|err| ToolSessionError::Transport(BamlRtError::QuickJsWithSource {
             context: "js tool join error".to_string(),
             source: Box::new(err),
-        })?
+        }))?
+        .map_err(ToolSessionError::Transport)?;
+        if let Some(error) = result.get("error").and_then(Value::as_str) {
+            self.completed = true;
+            return Ok(baml_rt_tools::ToolStep::Error {
+                error: ToolFailure::execution_failed(error.to_string()),
+            });
+        }
+        self.completed = true;
+        Ok(baml_rt_tools::ToolStep::Done { output: Some(result) })
+    }
+
+    async fn finish(&mut self) -> std::result::Result<(), ToolSessionError> {
+        self.completed = true;
+        Ok(())
+    }
+
+    async fn abort(&mut self, _reason: Option<String>) -> std::result::Result<(), ToolSessionError> {
+        self.completed = true;
+        Ok(())
     }
 }
 
@@ -454,7 +568,7 @@ mod tests {
 
         agent
             .register_js_tool(
-                "add_js",
+                "js/add",
                 "Adds two numbers",
                 json!({
                     "type": "object",
@@ -473,7 +587,7 @@ mod tests {
         let result = {
             let runtime = runtime.lock().await;
             runtime
-                .execute_tool("add_js", json!({"a": 2, "b": 3}))
+                .execute_tool("js/add", json!({"a": 2, "b": 3}))
                 .await
                 .expect("execute tool")
         };

@@ -14,9 +14,6 @@ pub mod tools {
     pub use baml_rt_tools::tools::*;
 }
 #[cfg(feature = "tools")]
-pub mod tool_mapper {
-    pub use baml_rt_tools::tool_mapper::*;
-}
 
 #[cfg(feature = "interceptor")]
 pub mod interceptor {

@@ -876,7 +876,7 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "serde_urlencoded",
- "sync_wrapper",
+ "sync_wrapper 1.0.2",
  "tokio",
  "tower",
  "tower-layer",
@@ -899,7 +899,7 @@ dependencies = [
  "mime",
  "pin-project-lite",
  "rustversion",
- "sync_wrapper",
+ "sync_wrapper 1.0.2",
  "tower-layer",
  "tower-service",
  "tracing",
@@ -961,11 +961,14 @@ dependencies = [
  "clap",
  "dotenvy",
  "flate2",
+ "schemars 1.1.0",
+ "serde",
  "serde_json",
  "tar",
  "test-support",
  "tokio",
  "tracing",
+ "ts-rs",
  "uuid",
 ]
 
@@ -1085,6 +1088,7 @@ dependencies = [
  "futures-util",
  "opentelemetry_sdk",
  "regex",
+ "schemars 1.1.0",
  "serde",
  "serde_json",
  "tar",
@@ -1097,6 +1101,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-test",
+ "ts-rs",
 ]
 
 [[package]]
@@ -1112,8 +1117,10 @@ dependencies = [
  "baml-rt-tools",
  "futures-util",
  "insta",
+ "inventory",
  "opentelemetry",
  "opentelemetry_sdk",
+ "schemars 1.1.0",
  "serde",
  "serde_json",
  "test-support",
@@ -1122,6 +1129,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "ts-rs",
  "uuid",
 ]
 
@@ -1134,9 +1142,12 @@ dependencies = [
  "baml-rt-core",
  "baml-rt-observability",
  "baml-rt-quickjs",
+ "baml-rt-tools",
  "baml-runtime",
  "clap",
  "flate2",
+ "genco",
+ "insta",
  "internal-baml-core",
  "oxc_allocator",
  "oxc_codegen",
@@ -1213,6 +1224,7 @@ dependencies = [
  "baml-rt-core",
  "baml-rt-id",
  "baml-rt-interceptor",
+ "baml-rt-tools",
  "insta",
  "serde",
  "serde_json",
@@ -1240,6 +1252,7 @@ dependencies = [
  "internal-baml-core",
  "quickjs_runtime",
  "regex",
+ "schemars 1.1.0",
  "serde",
  "serde_json",
  "test-support",
@@ -1247,6 +1260,7 @@ dependencies = [
  "tokio",
  "tokio-test",
  "tracing",
+ "ts-rs",
  "uuid",
 ]
 
@@ -1257,10 +1271,17 @@ dependencies = [
  "async-trait",
  "baml-rt",
  "baml-rt-core",
+ "genco",
+ "inventory",
+ "notion-client",
+ "schemars 1.1.0",
+ "serde",
  "serde_json",
  "test-support",
  "tokio",
  "tracing",
+ "ts-rs",
+ "uuid",
 ]
 
 [[package]]
@@ -1584,7 +1605,7 @@ dependencies = [
  "pin-project-lite",
  "rustls 0.23.35",
  "rustls-native-certs",
- "rustls-pemfile",
+ "rustls-pemfile 2.2.0",
  "rustls-pki-types",
  "serde",
  "serde_derive",
@@ -3057,6 +3078,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "genco"
+version = "0.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77ab846431e5d637791b3279e7242fe2b21e11c3d8b4cf6a99f645c5f16ba7c0"
+dependencies = [
+ "genco-macros",
+ "relative-path",
+ "smallvec",
+]
+
+[[package]]
+name = "genco-macros"
+version = "0.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c42a1fe5a699c7f1d36ea6e04ed680a5c787cabff4b610ae3b8954ea3bcefec1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.111",
+]
+
+[[package]]
 name = "generators-go"
 version = "0.218.1"
 source = "git+https://github.com/BoundaryML/baml?rev=d2cc1034826f3b56fa0ad3bcb5c4424de2de8b1c#d2cc1034826f3b56fa0ad3bcb5c4424de2de8b1c"
@@ -3627,6 +3670,19 @@ dependencies = [
 
 [[package]]
 name = "hyper-tls"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6183ddfa99b85da61a140bea0efc93fdf56ceaa041b37d553518030827f9905"
+dependencies = [
+ "bytes",
+ "hyper 0.14.32",
+ "native-tls",
+ "tokio",
+ "tokio-native-tls",
+]
+
+[[package]]
+name = "hyper-tls"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "70206fc6890eaca9fde8a0bf71caa2ddfc9fe045ac9e5c70df101a7dbde866e0"
@@ -3660,7 +3716,7 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "socket2 0.6.1",
- "system-configuration",
+ "system-configuration 0.6.1",
  "tokio",
  "tower-service",
  "tracing",
@@ -4118,6 +4174,15 @@ dependencies = [
  "serde",
  "serde_json",
  "strum 0.26.3",
+]
+
+[[package]]
+name = "inventory"
+version = "0.3.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc61209c082fbeb19919bee74b176221b27223e27b65d781eb91af24eb1fb46e"
+dependencies = [
+ "rustversion",
 ]
 
 [[package]]
@@ -4732,6 +4797,22 @@ dependencies = [
  "notify",
  "parking_lot",
  "walkdir",
+]
+
+[[package]]
+name = "notion-client"
+version = "1.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3231c57108613062b938bb06f81c2ffa62627b2e4abff467863a7ef65e082e96"
+dependencies = [
+ "chrono",
+ "derive_builder",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "thiserror 1.0.69",
+ "urlencoding",
 ]
 
 [[package]]
@@ -6252,6 +6333,46 @@ checksum = "ba39f3699c378cd8970968dcbff9c43159ea4cfbd88d43c00b22f2ef10a435d2"
 
 [[package]]
 name = "reqwest"
+version = "0.11.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd67538700a17451e7cba03ac727fb961abb7607553461627b97de0b89cf4a62"
+dependencies = [
+ "base64 0.21.7",
+ "bytes",
+ "encoding_rs",
+ "futures-core",
+ "futures-util",
+ "h2 0.3.27",
+ "http 0.2.12",
+ "http-body 0.4.6",
+ "hyper 0.14.32",
+ "hyper-tls 0.5.0",
+ "ipnet",
+ "js-sys",
+ "log",
+ "mime",
+ "native-tls",
+ "once_cell",
+ "percent-encoding",
+ "pin-project-lite",
+ "rustls-pemfile 1.0.4",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "sync_wrapper 0.1.2",
+ "system-configuration 0.5.1",
+ "tokio",
+ "tokio-native-tls",
+ "tower-service",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "winreg",
+]
+
+[[package]]
+name = "reqwest"
 version = "0.12.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b4c14b2d9afca6a60277086b0cc6a6ae0b568f6f7916c943a8cdc79f8be240f"
@@ -6267,7 +6388,7 @@ dependencies = [
  "http-body-util",
  "hyper 1.8.1",
  "hyper-rustls 0.27.7",
- "hyper-tls",
+ "hyper-tls 0.6.0",
  "hyper-util",
  "js-sys",
  "log",
@@ -6279,7 +6400,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_urlencoded",
- "sync_wrapper",
+ "sync_wrapper 1.0.2",
  "tokio",
  "tokio-native-tls",
  "tokio-util",
@@ -6322,7 +6443,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
- "sync_wrapper",
+ "sync_wrapper 1.0.2",
  "tokio",
  "tokio-rustls 0.26.4",
  "tokio-util",
@@ -6470,6 +6591,15 @@ dependencies = [
 
 [[package]]
 name = "rustls-pemfile"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c74cae0a4cf6ccbbf5f359f08efdf8ee7e1dc532573bf0db71968cb56b1448c"
+dependencies = [
+ "base64 0.21.7",
+]
+
+[[package]]
+name = "rustls-pemfile"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
@@ -6592,8 +6722,21 @@ checksum = "9558e172d4e8533736ba97870c4b2cd63f84b382a3d6eb063da41b91cce17289"
 dependencies = [
  "dyn-clone",
  "ref-cast",
+ "schemars_derive",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "schemars_derive"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "301858a4023d78debd2353c7426dc486001bddc91ae31a76fb1f55132f7e2633"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde_derive_internals",
+ "syn 2.0.111",
 ]
 
 [[package]]
@@ -6736,6 +6879,17 @@ name = "serde_derive"
 version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.111",
+]
+
+[[package]]
+name = "serde_derive_internals"
+version = "0.29.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18d26a20a969b9e3fdf2fc2d9f21eda6c40e2de84c9408bb5d3b05d499aae711"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -8319,6 +8473,12 @@ dependencies = [
 
 [[package]]
 name = "sync_wrapper"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2047c6ded9c721764247e62cd3b03c09ffc529b2ba5b10ec482ae507a4a70160"
+
+[[package]]
+name = "sync_wrapper"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bf256ce5efdfa370213c1dabab5935a12e49f2c58d15e9eac2870d3b4f27263"
@@ -8339,13 +8499,34 @@ dependencies = [
 
 [[package]]
 name = "system-configuration"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba3a3adc5c275d719af8cb4272ea1c4a6d668a777f37e115f6d11ddbc1c8e0e7"
+dependencies = [
+ "bitflags 1.3.2",
+ "core-foundation 0.9.4",
+ "system-configuration-sys 0.5.0",
+]
+
+[[package]]
+name = "system-configuration"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3c879d448e9d986b661742763247d3693ed13609438cf3d006f51f5368a5ba6b"
 dependencies = [
  "bitflags 2.10.0",
  "core-foundation 0.9.4",
- "system-configuration-sys",
+ "system-configuration-sys 0.6.0",
+]
+
+[[package]]
+name = "system-configuration-sys"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a75fb188eb626b924683e3b95e3a48e63551fcfb51949de2f06a9d91dbee93c9"
+dependencies = [
+ "core-foundation-sys",
+ "libc",
 ]
 
 [[package]]
@@ -8426,10 +8607,14 @@ dependencies = [
  "async-trait",
  "baml-rt",
  "baml-rt-core",
+ "baml-rt-tools",
  "dotenvy",
+ "schemars 1.1.0",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",
+ "ts-rs",
  "uuid",
 ]
 
@@ -8767,7 +8952,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "pin-project-lite",
- "sync_wrapper",
+ "sync_wrapper 1.0.2",
  "tokio",
  "tower-layer",
  "tower-service",
@@ -9817,6 +10002,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a5364e9d77fcdeeaa6062ced926ee3381faa2ee02d3eb83a5c27a8825540829"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "winreg"
+version = "0.50.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "524e57b2c537c0f9b1e69f1965311ec12182b4122e45035b1508cd24d2adadb1"
+dependencies = [
+ "cfg-if",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

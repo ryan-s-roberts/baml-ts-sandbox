@@ -12,6 +12,7 @@ pub mod store;
 pub mod interceptors;
 pub mod normalizer;
 pub mod falkordb_store;
+pub mod tool_index;
 pub mod vocabulary;
 pub mod id_semantics;
 
@@ -26,6 +27,7 @@ pub use normalizer::{
     NormalizedProv, ProvNormalizer,
 };
 pub use falkordb_store::{FalkorDbProvenanceConfig, FalkorDbProvenanceWriter};
+pub use tool_index::{ToolIndexConfig, index_tools};
 pub use types::{
     ProvActivityId, ProvAgentId, ProvEntityId, ProvNodeRef,
 };

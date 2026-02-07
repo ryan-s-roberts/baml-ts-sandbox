@@ -1,6 +1,7 @@
 //! LLM-backed tool workflows (Rust + JavaScript tools).
 
 use serde_json::json;
+use baml_rt_tools::ToolStep;
 
 use test_support::common::{WeatherTool, CalculatorTool, UppercaseTool, DelayedResponseTool};
 use test_support::common::{assert_tool_registered_in_js, require_api_key, setup_baml_runtime_default, setup_bridge};
@@ -23,8 +24,8 @@ async fn test_e2e_llm_with_tools() {
     {
         let manager = baml_manager.lock().await;
         let tools = manager.list_tools().await;
-        assert!(tools.contains(&"get_weather".to_string()), "Weather tool should be registered");
-        assert!(tools.contains(&"calculate".to_string()), "Calculator tool should be registered");
+        assert!(tools.contains(&"support/get_weather".to_string()), "Weather tool should be registered");
+        assert!(tools.contains(&"support/calculate".to_string()), "Calculator tool should be registered");
         tracing::info!("✅ Tools registered: {:?}", tools);
     }
     
@@ -33,9 +34,34 @@ async fn test_e2e_llm_with_tools() {
         let manager = baml_manager.lock().await;
         
         // Test weather tool
-        let weather_result = manager.execute_tool("get_weather", json!({"location": "San Francisco, CA"}))
+        let session_id = manager
+            .open_tool_session("support/get_weather")
             .await
-            .expect("Weather tool execution should succeed");
+            .expect("open tool session should succeed");
+        manager
+            .tool_session_send(&session_id, json!({"location": "San Francisco, CA"}))
+            .await
+            .expect("tool session send should succeed");
+        let weather_result = loop {
+            match manager
+                .tool_session_next(&session_id)
+                .await
+                .expect("tool session next should succeed")
+            {
+                ToolStep::Streaming { output } => {
+                    manager.tool_session_finish(&session_id).await.unwrap();
+                    break output;
+                }
+                ToolStep::Done { output } => {
+                    manager.tool_session_finish(&session_id).await.unwrap();
+                    break output.unwrap_or_else(|| json!({}));
+                }
+                ToolStep::Error { error } => {
+                    manager.tool_session_abort(&session_id, Some(error.message)).await.unwrap();
+                    panic!("Weather tool execution failed");
+                }
+            }
+        };
         
         let weather_obj = weather_result.as_object().expect("Expected object");
         assert!(weather_obj.contains_key("temperature"), "Weather result should contain temperature");
@@ -47,9 +73,37 @@ async fn test_e2e_llm_with_tools() {
         tracing::info!("✅ Weather tool executed successfully: {:?}", weather_result);
         
         // Test calculator tool
-        let calc_result = manager.execute_tool("calculate", json!({"expression": {"left": 15, "operation": "Multiply", "right": 23}}))
+        let session_id = manager
+            .open_tool_session("support/calculate")
             .await
-            .expect("Calculator tool execution should succeed");
+            .expect("open tool session should succeed");
+        manager
+            .tool_session_send(
+                &session_id,
+                json!({"expression": {"left": 15, "operation": "Multiply", "right": 23}}),
+            )
+            .await
+            .expect("tool session send should succeed");
+        let calc_result = loop {
+            match manager
+                .tool_session_next(&session_id)
+                .await
+                .expect("tool session next should succeed")
+            {
+                ToolStep::Streaming { output } => {
+                    manager.tool_session_finish(&session_id).await.unwrap();
+                    break output;
+                }
+                ToolStep::Done { output } => {
+                    manager.tool_session_finish(&session_id).await.unwrap();
+                    break output.unwrap_or_else(|| json!({}));
+                }
+                ToolStep::Error { error } => {
+                    manager.tool_session_abort(&session_id, Some(error.message)).await.unwrap();
+                    panic!("Calculator tool execution failed");
+                }
+            }
+        };
         
         let calc_obj = calc_result.as_object().expect("Expected object");
         let result = calc_obj.get("result").and_then(|v| v.as_f64()).unwrap();
@@ -109,7 +163,7 @@ async fn test_e2e_js_tool_workflow_llm_to_js() {
     let mut bridge = setup_bridge(baml_manager.clone()).await;
     
     // Verify tool is registered in JS
-    assert_tool_registered_in_js(&mut bridge, "uppercase").await;
+    assert_tool_registered_in_js(&mut bridge, "support/uppercase").await;
     
     // Invoke function that uses tool
     {
@@ -185,7 +239,7 @@ async fn test_e2e_js_tool_with_llm() {
     
     // Register JS tool in QuickJS
     let mut bridge = setup_bridge(baml_manager.clone()).await;
-    bridge.register_js_tool("js_concat", r#"
+    bridge.register_js_tool("js/concat", r#"
         async function(a, b) {
             return { result: `${a} ${b}` };
         }

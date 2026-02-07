@@ -1,0 +1,12 @@
+---
+source: crates/baml-rt-builder/tests/codegen_test.rs
+expression: metadata_summary
+---
+name: support/calculate
+class_name: SupportCalculate
+input_type: CalculatorInput
+output_type: CalculatorOutput
+open_input_type: ()
+has_input_schema: true
+has_output_schema: true
+has_open_input_schema: true

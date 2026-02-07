@@ -3,115 +3,140 @@
 use async_trait::async_trait;
 use baml_rt::Result;
 use baml_rt::tools::BamlTool;
-use serde_json::{json, Value};
+use baml_rt_tools::bundles::Support;
+use serde::{Deserialize, Serialize};
+use schemars::JsonSchema;
+use ts_rs::TS;
 
 /// Example weather tool
 pub struct WeatherTool;
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(export)]
+pub struct WeatherInput {
+    location: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(export)]
+pub struct WeatherOutput {
+    location: String,
+    temperature: String,
+    temperature_f: i64,
+    condition: String,
+    humidity: String,
+    wind_speed: String,
+    description: String,
+}
+
 #[async_trait]
 impl BamlTool for WeatherTool {
-    const NAME: &'static str = "get_weather";
+    type Bundle = Support;
+    const LOCAL_NAME: &'static str = "get_weather";
+    type OpenInput = ();
+    type Input = WeatherInput;
+    type Output = WeatherOutput;
     
     fn description(&self) -> &'static str {
         "Gets the current weather for a specific location. Returns temperature, condition, and humidity."
     }
     
-    fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "location": {
-                    "type": "string",
-                    "description": "The city and state or city and country, e.g. San Francisco, CA or London, UK"
-                }
-            },
-            "required": ["location"]
+    async fn execute(&self, args: Self::Input) -> Result<Self::Output> {
+        let location = args.location;
+        
+        tracing::info!(location = location.as_str(), "WeatherTool executed");
+        
+        Ok(WeatherOutput {
+            location: location.clone(),
+            temperature: "22°C".to_string(),
+            temperature_f: 72,
+            condition: "Sunny with clear skies".to_string(),
+            humidity: "65%".to_string(),
+            wind_speed: "10 km/h".to_string(),
+            description: format!("Current weather in {}: Sunny, 22°C, 65% humidity", location),
         })
-    }
-    
-    async fn execute(&self, args: Value) -> Result<Value> {
-        let obj = args.as_object().expect("Expected object");
-        let location = obj
-            .get("location")
-            .and_then(|v| v.as_str())
-            .expect("Expected 'location' string");
-        
-        tracing::info!(location = location, "WeatherTool executed");
-        
-        // Return mock weather data
-        Ok(json!({
-            "location": location,
-            "temperature": "22°C",
-            "temperature_f": 72,
-            "condition": "Sunny with clear skies",
-            "humidity": "65%",
-            "wind_speed": "10 km/h",
-            "description": format!("Current weather in {}: Sunny, 22°C, 65% humidity", location)
-        }))
     }
 }
 
 /// Example uppercase string tool
 pub struct UppercaseTool;
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(export)]
+pub struct UppercaseInput {
+    text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(export)]
+pub struct UppercaseOutput {
+    result: String,
+    original: String,
+}
+
 #[async_trait]
 impl BamlTool for UppercaseTool {
-    const NAME: &'static str = "uppercase";
+    type Bundle = Support;
+    const LOCAL_NAME: &'static str = "uppercase";
+    type OpenInput = ();
+    type Input = UppercaseInput;
+    type Output = UppercaseOutput;
     
     fn description(&self) -> &'static str {
         "Converts a string to uppercase"
     }
     
-    fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "text": {"type": "string", "description": "Text to convert to uppercase"}
-            },
-            "required": ["text"]
+    async fn execute(&self, args: Self::Input) -> Result<Self::Output> {
+        Ok(UppercaseOutput {
+            result: args.text.to_uppercase(),
+            original: args.text,
         })
-    }
-    
-    async fn execute(&self, args: Value) -> Result<Value> {
-        let obj = args.as_object().expect("Expected object");
-        let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("");
-        Ok(json!({"result": text.to_uppercase(), "original": text}))
     }
 }
 
 /// Delayed response tool for testing async operations
 pub struct DelayedResponseTool;
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(export)]
+pub struct DelayedInput {
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(export)]
+pub struct DelayedOutput {
+    response: String,
+    timestamp: String,
+}
+
 #[async_trait]
 impl BamlTool for DelayedResponseTool {
-    const NAME: &'static str = "delayed_response";
+    type Bundle = Support;
+    const LOCAL_NAME: &'static str = "delayed_response";
+    type OpenInput = ();
+    type Input = DelayedInput;
+    type Output = DelayedOutput;
     
     fn description(&self) -> &'static str {
         "Returns a response after a short delay (simulates async operation)"
     }
     
-    fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "message": {"type": "string", "description": "Message to return"}
-            },
-            "required": ["message"]
-        })
-    }
-    
-    async fn execute(&self, args: Value) -> Result<Value> {
+    async fn execute(&self, args: Self::Input) -> Result<Self::Output> {
         use tokio::time::{sleep, Duration};
-        
-        let obj = args.as_object().expect("Expected object");
-        let message = obj.get("message").and_then(|v| v.as_str()).unwrap_or("");
         
         // Simulate async work
         sleep(Duration::from_millis(50)).await;
         
-        Ok(json!({
-            "response": format!("Delayed: {}", message),
-            "timestamp": format!("{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs())
-        }))
+        Ok(DelayedOutput {
+            response: format!("Delayed: {}", args.message),
+            timestamp: format!(
+                "{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+            ),
+        })
     }
 }

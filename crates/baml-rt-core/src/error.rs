@@ -99,9 +99,6 @@ pub enum BamlRtError {
         source: AnyhowError,
     },
 
-    /// Tool mapper lock poisoned
-    #[error("Tool mapper lock poisoned")]
-    ToolMapperLockPoisoned,
 
     /// System time error
     #[error("System time error: {0}")]

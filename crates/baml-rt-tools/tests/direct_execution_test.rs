@@ -21,7 +21,7 @@ async fn test_direct_tool_execution_rust_and_js() {
         let runtime = agent.runtime();
         let runtime = runtime.lock().await;
         runtime
-            .execute_tool("calculate", json!({"expression": {"left": 6, "operation": "Multiply", "right": 7}}))
+            .execute_tool("support/calculate", json!({"expression": {"left": 6, "operation": "Multiply", "right": 7}}))
             .await
             .expect("execute rust tool")
     };
@@ -33,7 +33,7 @@ async fn test_direct_tool_execution_rust_and_js() {
 
     agent
         .register_js_tool(
-            "add_js",
+            "js/add",
             "Adds two numbers",
             json!({
                 "type": "object",
@@ -52,7 +52,7 @@ async fn test_direct_tool_execution_rust_and_js() {
         let runtime = agent.runtime();
         let runtime = runtime.lock().await;
         runtime
-            .execute_tool("add_js", json!({"a": 10, "b": 5}))
+            .execute_tool("js/add", json!({"a": 10, "b": 5}))
             .await
             .expect("execute js tool")
     };
