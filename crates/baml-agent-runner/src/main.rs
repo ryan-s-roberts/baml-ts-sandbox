@@ -5,15 +5,27 @@
 //! and metadata.
 
 use baml_rt_a2a::{A2aAgent, A2aRequestHandler, a2a};
-use baml_rt_a2a::a2a_types::JSONRPCId;
-use baml_rt_core::{BamlRtError, Result};
+use baml_rt_a2a::a2a_types::{
+    JSONRPCId, JSONRPCRequest, Message, MessageRole, Part, SendMessageConfiguration,
+    SendMessageRequest, ROLE_USER,
+};
+use baml_rt_core::ids::{AgentId, DerivedId, ExternalId, TaskId};
+use baml_rt_a2a::a2a_types::A2aMessageId;
+use baml_rt_core::{BamlRtError, ContextId, Result};
+use baml_rt_core::context;
+use baml_rt_provenance::{AgentType, ProvEvent};
 use baml_rt_observability::{spans, tracing_setup};
-use baml_rt_quickjs::{BamlRuntimeManager, QuickJSBridge};
+use baml_rt_provenance::{
+    FalkorDbProvenanceConfig, FalkorDbProvenanceWriter, InMemoryProvenanceStore, ProvenanceWriter,
+};
+use baml_rt_quickjs::BamlRuntimeManager;
 use anyhow::Context;
+use clap::{Parser, ValueEnum};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Mutex;
 use tracing::{error, info};
 
@@ -23,16 +35,21 @@ struct AgentManifest {
     version: String,
     name: String,
     entry_point: String,
+    signature: String,
 }
 
-/// Agent package loader and executor
+/// Inert agent package - just holds package data
 struct AgentPackage {
     name: String,
-    agent: A2aAgent,
+    version: String,
+    entry_point: String,
+    signature: String,
+    extract_dir: PathBuf,
+    baml_src: PathBuf,
 }
 
 impl AgentPackage {
-    /// Load an agent package from a tar.gz file
+    /// Load an agent package from a tar.gz file (inert - does not boot the agent)
     async fn load_from_file(package_path: &Path) -> Result<Self> {
         let span = spans::load_agent_package(package_path);
         let _guard = span.enter();
@@ -87,6 +104,13 @@ impl AgentPackage {
                 .and_then(|v| v.as_str())
                 .unwrap_or("dist/index.js")
                 .to_string(),
+            signature: manifest_json
+                .get("signature")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| BamlRtError::InvalidArgument(
+                    "manifest.json missing 'signature' field".to_string()
+                ))?
+                .to_string(),
         };
 
         info!(
@@ -104,50 +128,69 @@ impl AgentPackage {
             ));
         }
 
-        // Create runtime manager
+        Ok(Self {
+            name: manifest.name,
+            version: manifest.version,
+            entry_point: manifest.entry_point,
+            signature: manifest.signature,
+            extract_dir,
+            baml_src,
+        })
+    }
+
+    /// Boot this package into a running A2aAgent
+    /// 
+    /// This creates the runtime, loads BAML schema, creates QuickJS bridge,
+    /// loads JavaScript code, and returns a configured A2aAgent.
+    /// The agent_id is generated internally by A2aAgent.
+    async fn boot(
+        &self,
+        provenance_writer: Option<Arc<dyn ProvenanceWriter>>,
+    ) -> Result<(A2aAgent, AgentId)> {
+        let span = spans::load_agent_package(&self.extract_dir);
+        let _guard = span.enter();
+
+        // Create runtime manager and load BAML schema
         let mut runtime_manager = BamlRuntimeManager::new()?;
-        
-        // Load BAML schema
         {
-            let schema_span = spans::load_baml_schema(&baml_src);
+            let schema_span = spans::load_baml_schema(&self.baml_src);
             let _schema_guard = schema_span.enter();
-            let baml_src_str = baml_src.to_str()
+            let baml_src_str = self.baml_src.to_str()
                 .ok_or_else(|| BamlRtError::InvalidArgument(
                     "BAML source path contains invalid UTF-8".to_string()
                 ))?;
             runtime_manager.load_schema(baml_src_str)?;
-            info!(agent = manifest.name, "BAML schema loaded");
+            info!(agent = self.name, "BAML schema loaded");
         }
 
-        // Create QuickJS bridge and expose BAML functions to it
+        // Build A2aAgent - it will generate agent_id internally and create QuickJS bridge
         let runtime_manager_arc = Arc::new(Mutex::new(runtime_manager));
-        let bridge = {
-            let bridge_span = spans::create_js_bridge();
-            let _bridge_guard = bridge_span.enter();
-            let mut bridge = QuickJSBridge::new(runtime_manager_arc.clone()).await?;
-            bridge.register_baml_functions().await?;
-            info!(agent = manifest.name, "BAML functions registered with QuickJS");
-            Arc::new(Mutex::new(bridge))
-        };
+        let mut agent_builder = A2aAgent::builder()
+            .with_runtime_handle(runtime_manager_arc.clone())
+            .with_baml_helpers(true); // Register BAML functions
+        
+        if let Some(writer) = provenance_writer.clone() {
+            agent_builder = agent_builder.with_provenance_writer(writer);
+        }
 
-        // Load agent's JavaScript code from dist/entry_point
-        let entry_point_path = extract_dir.join(&manifest.entry_point);
+        let agent = agent_builder.build().await?;
+        
+        // Load and evaluate agent JavaScript code
+        let entry_point_path = self.extract_dir.join(&self.entry_point);
         if entry_point_path.exists() {
-            let eval_span = spans::evaluate_agent_code(&manifest.entry_point);
+            let eval_span = spans::evaluate_agent_code(&self.entry_point);
             let _eval_guard = eval_span.enter();
 
             let agent_code = std::fs::read_to_string(&entry_point_path)
                 .map_err(BamlRtError::Io)?;
             
-            info!(entry_point = manifest.entry_point, "Loading agent JavaScript code");
+            info!(entry_point = self.entry_point, "Loading agent JavaScript code");
 
-            // Execute the agent's code to initialize it
-            // The code should expose functions that can be called later
-            // We ignore the result since it's just initialization code
-            match bridge.lock().await.evaluate(&agent_code).await {
+            let bridge = agent.bridge();
+            let mut bridge_guard = bridge.lock().await;
+            match bridge_guard.evaluate(&agent_code).await {
                 Ok(_) => info!("Agent code executed successfully"),
                 Err(e) => {
-                    // Log warning but don't fail - the code might just not return a value
                     tracing::warn!(
                         error = %e,
                         "Agent code execution returned an error (may be expected)"
@@ -158,34 +201,53 @@ impl AgentPackage {
             info!("Agent JavaScript code loaded and initialized");
         } else {
             info!(
-                entry_point = manifest.entry_point,
+                entry_point = self.entry_point,
                 "Agent entry point not found, skipping JavaScript initialization"
             );
         }
 
-        let agent = A2aAgent::builder()
-            .with_runtime_handle(runtime_manager_arc)
-            .with_bridge_handle(bridge)
-            .with_baml_helpers(false)
-            .build()
-            .await?;
+        // Get agent_id from the agent (generated during A2aAgent::build())
+        let agent_id = agent.agent_id().clone();
 
-        Ok(Self {
-            name: manifest.name,
-            agent,
-        })
+        // Emit AgentBooted provenance event
+        if let Some(writer) = provenance_writer {
+            // Use stable archive identity from manifest signature
+            let archive_path = self.signature.clone();
+            let context_id = context::generate_context_id();
+            let agent_type_parsed = AgentType::new(self.name.clone())
+                .ok_or_else(|| {
+                    BamlRtError::InvalidArgument("agent_type cannot be empty".to_string())
+                })?;
+            let boot_event = ProvEvent::agent_booted(
+                context_id,
+                agent_id.clone(),
+                agent_type_parsed,
+                self.version.clone(),
+                archive_path,
+            );
+            if let Err(e) = writer.add_event(boot_event).await {
+                error!(error = ?e, agent_id = %agent_id, "Failed to write AgentBooted event to provenance store");
+            } else {
+                info!(agent_id = %agent_id, "AgentBooted event written to provenance store");
+            }
+        }
+
+        Ok((agent, agent_id))
     }
 
     /// Get the agent name
     fn name(&self) -> &str {
         &self.name
     }
+}
 
-    /// Execute a function in this agent
-    /// 
-    /// Calls a JavaScript function exposed by the agent.
+/// Booted agent - holds the running A2aAgent
+struct BootedAgent {
+    agent: A2aAgent,
+}
+
+impl BootedAgent {
     async fn invoke_function(&self, function_name: &str, args: Value) -> Result<Value> {
-        // Delegate to QuickJSBridge's JS-only invocation
         let bridge = self.agent.bridge();
         let mut js_bridge = bridge.lock().await;
         js_bridge.invoke_js_function(function_name, args).await
@@ -194,27 +256,35 @@ impl AgentPackage {
     async fn handle_a2a(&self, request: Value) -> Result<Vec<Value>> {
         self.agent.handle_a2a(request).await
     }
-
 }
 
 /// Agent runner that manages multiple agent packages
 struct AgentRunner {
-    agents: HashMap<String, AgentPackage>,
+    agents: HashMap<String, BootedAgent>,
+    provenance_writer: Option<Arc<dyn ProvenanceWriter>>,
 }
 
 impl AgentRunner {
-    fn new() -> Self {
+    fn new(provenance_writer: Option<Arc<dyn ProvenanceWriter>>) -> Self {
         Self {
             agents: HashMap::new(),
+            provenance_writer,
         }
     }
 
-    /// Load an agent package
+    /// Load and boot an agent package
     async fn load_agent(&mut self, package_path: &Path) -> Result<()> {
-        let agent = AgentPackage::load_from_file(package_path).await?;
-        let name = agent.name().to_string();
-        info!(agent = name, "Agent loaded successfully");
-        self.agents.insert(name.clone(), agent);
+        let package = AgentPackage::load_from_file(package_path).await?;
+        let name = package.name().to_string();
+        // Boot the package into a running agent
+        let (agent, _agent_id) = package.boot(self.provenance_writer.clone()).await?;
+        
+        let booted = BootedAgent {
+            agent,
+        };
+        
+        info!(agent = name, "Agent loaded and booted successfully");
+        self.agents.insert(name.clone(), booted);
         Ok(())
     }
 
@@ -254,22 +324,10 @@ impl AgentRunner {
                 continue;
             }
 
-            let mut request_value: Value = match serde_json::from_str(line) {
-                Ok(value) => value,
-                Err(err) => {
-                    let response = a2a::error_response(
-                        None,
-                        -32700,
-                        "JSON parse error",
-                        Some(Value::String(err.to_string())),
-                    );
-                    let serialized = serde_json::to_string(&response)
-                        .unwrap_or_else(|_| "{\"error\":\"serialization failed\"}".to_string());
-                    stdout.write_all(serialized.as_bytes()).await?;
-                    stdout.write_all(b"\n").await?;
-                    stdout.flush().await?;
-                    continue;
-                }
+            let mut request_value: Value = match serde_json::from_str::<Value>(line) {
+                Ok(value) if value.is_object() => value,
+                Ok(_) => wrap_plaintext_message(line),
+                Err(_) => wrap_plaintext_message(line),
             };
 
             let request_id = a2a::extract_jsonrpc_id(&request_value);
@@ -385,6 +443,21 @@ impl AgentRunner {
             params.insert("stream".to_string(), Value::Bool(true));
         }
 
+        if method_name == "message.send" || method_name == "message.sendStream" {
+            if let Some(message_value) = params.get_mut("message")
+                && message_value.is_object()
+            {
+                if let Some(message_obj) = message_value.as_object_mut() {
+                    let metadata_entry = message_obj
+                        .entry("metadata".to_string())
+                        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+                    if let Value::Object(meta_obj) = metadata_entry {
+                        meta_obj.entry("agent".to_string()).or_insert_with(|| Value::String(agent_name.clone()));
+                    }
+                }
+            }
+        }
+
         obj.insert("method".to_string(), Value::String(method_name));
         obj.insert("params".to_string(), Value::Object(params));
 
@@ -401,7 +474,7 @@ fn strip_stream_suffix(method: &str) -> (String, bool) {
     (method.to_string(), false)
 }
 
-fn split_agent_method(method: &str, agents: &HashMap<String, AgentPackage>) -> Option<(String, String)> {
+fn split_agent_method(method: &str, agents: &HashMap<String, BootedAgent>) -> Option<(String, String)> {
     for sep in ["::", "/", "."] {
         if let Some((prefix, suffix)) = method.split_once(sep)
             && agents.contains_key(prefix)
@@ -427,6 +500,156 @@ fn map_a2a_error(id: Option<JSONRPCId>, err: BamlRtError) -> Value {
     }
 }
 
+static MESSAGE_COUNTER: AtomicU64 = AtomicU64::new(1);
+static CONTEXT_COUNTER: AtomicU64 = AtomicU64::new(1);
+static STDIO_CONTEXT_ID: std::sync::OnceLock<ContextId> = std::sync::OnceLock::new();
+static STDIO_TASK_ID: std::sync::OnceLock<TaskId> = std::sync::OnceLock::new();
+
+fn stdio_context_id() -> ContextId {
+    STDIO_CONTEXT_ID
+        .get_or_init(|| {
+            let _ = CONTEXT_COUNTER.fetch_add(1, Ordering::Relaxed);
+            context::generate_context_id()
+        })
+        .clone()
+}
+
+fn stdio_task_id() -> TaskId {
+    STDIO_TASK_ID
+        .get_or_init(|| {
+            TaskId::from_external(ExternalId::new(format!(
+                "cli-task-{}",
+                stdio_context_id().as_str()
+            )))
+        })
+        .clone()
+}
+
+fn wrap_plaintext_message(text: &str) -> Value {
+    let message_id = A2aMessageId::outgoing(DerivedId::new(format!(
+        "cli-msg-{}",
+        MESSAGE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    )));
+    let message = Message {
+        message_id,
+        role: MessageRole::String(ROLE_USER.to_string()),
+        parts: vec![Part { text: Some(text.to_string()), ..Part::default() }],
+        context_id: Some(stdio_context_id()),
+        task_id: Some(stdio_task_id()),
+        reference_task_ids: Vec::new(),
+        extensions: Vec::new(),
+        metadata: None,
+        extra: HashMap::new(),
+    };
+    let params = SendMessageRequest {
+        message,
+        configuration: Some(SendMessageConfiguration { blocking: Some(true), ..Default::default() }),
+        metadata: None,
+        tenant: None,
+        extra: HashMap::new(),
+    };
+    let request = JSONRPCRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "message.sendStream".to_string(),
+        params: Some(serde_json::to_value(params).unwrap_or(Value::Null)),
+        id: Some(JSONRPCId::Null),
+    };
+    serde_json::to_value(request).unwrap_or(Value::Null)
+}
+
+#[derive(Debug, Clone)]
+enum ProvenanceStoreKind {
+    Memory,
+    FalkorDb { url: String, graph: String },
+}
+
+#[derive(Debug, Clone)]
+struct RunnerConfig {
+    packages: Vec<PathBuf>,
+    invoke: Option<(String, String, String)>,
+    a2a_stdio: bool,
+    provenance_store: ProvenanceStoreKind,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ProvenanceStoreChoice {
+    Memory,
+    Falkordb,
+}
+
+#[derive(Debug, Parser)]
+#[command(name = "baml-agent-runner")]
+#[command(about = "Load and execute one or more packaged agents", long_about = None)]
+struct Cli {
+    /// Agent package tar.gz paths to load.
+    #[arg(value_name = "AGENT_PACKAGE", required = true)]
+    packages: Vec<PathBuf>,
+
+    /// Invoke a JS function: <agent> <function> <json-args>
+    #[arg(long, num_args = 3, value_names = ["AGENT", "FUNCTION", "JSON_ARGS"])]
+    invoke: Option<Vec<String>>,
+
+    /// Run an A2A JSON-RPC loop over stdio.
+    #[arg(long)]
+    a2a_stdio: bool,
+
+    /// Provenance storage backend.
+    #[arg(long, value_enum, default_value_t = ProvenanceStoreChoice::Memory)]
+    provenance_store: ProvenanceStoreChoice,
+
+    /// FalkorDB connection URL (required when provenance store is falkordb).
+    #[arg(long)]
+    falkordb_url: Option<String>,
+
+    /// FalkorDB graph name (defaults to baml_prov).
+    #[arg(long, default_value = "baml_prov")]
+    falkordb_graph: String,
+}
+
+impl Cli {
+    fn into_config(self) -> anyhow::Result<RunnerConfig> {
+        let invoke = self.invoke.map(|values| {
+            (
+                values[0].clone(),
+                values[1].clone(),
+                values[2].clone(),
+            )
+        });
+
+        let provenance_store = match self.provenance_store {
+            ProvenanceStoreChoice::Memory => ProvenanceStoreKind::Memory,
+            ProvenanceStoreChoice::Falkordb => {
+                let url = self.falkordb_url.ok_or_else(|| {
+                    anyhow::anyhow!("--falkordb-url is required for falkordb store")
+                })?;
+                ProvenanceStoreKind::FalkorDb {
+                    url,
+                    graph: self.falkordb_graph,
+                }
+            }
+        };
+
+        Ok(RunnerConfig {
+            packages: self.packages,
+            invoke,
+            a2a_stdio: self.a2a_stdio,
+            provenance_store,
+        })
+    }
+}
+
+fn build_provenance_writer(
+    store: &ProvenanceStoreKind,
+) -> Option<Arc<dyn ProvenanceWriter>> {
+    match store {
+        ProvenanceStoreKind::Memory => Some(Arc::new(InMemoryProvenanceStore::new())),
+        ProvenanceStoreKind::FalkorDb { url, graph } => {
+            let config = FalkorDbProvenanceConfig::new(url.clone(), graph.clone());
+            Some(Arc::new(FalkorDbProvenanceWriter::new(config)))
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Initialize tracing
@@ -435,64 +658,38 @@ async fn main() -> anyhow::Result<()> {
     info!("BAML Agent Runner starting");
 
     // Parse command line arguments
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        eprintln!("Usage: {} <agent-package.tar.gz> [agent-package2.tar.gz ...] [--invoke <agent> <function> <json-args>] [--a2a-stdio]", args[0]);
-        eprintln!();
-        eprintln!("Examples:");
-        eprintln!("  {} agent1.tar.gz agent2.tar.gz", args[0]);
-        eprintln!("  {} agent1.tar.gz --invoke agent1 SimpleGreeting '{{\"name\":\"World\"}}'", args[0]);
-        eprintln!("  {} agent1.tar.gz --a2a-stdio", args[0]);
-        std::process::exit(1);
-    }
+    let config = Cli::parse().into_config().context("Failed to parse arguments")?;
+    let provenance_writer = build_provenance_writer(&config.provenance_store);
+    let mut runner = AgentRunner::new(provenance_writer);
 
-    let mut runner = AgentRunner::new();
-    let mut a2a_stdio = false;
+    for package in &config.packages {
+        let package_path = Path::new(package);
+        if !package_path.exists() {
+            eprintln!("Error: Agent package not found: {}", package_path.display());
+            std::process::exit(1);
+        }
 
-    // Parse arguments
-    let mut i = 1;
-    while i < args.len() {
-        if args[i] == "--invoke" {
-            // Invoke mode
-            if i + 3 >= args.len() {
-                eprintln!("Error: --invoke requires <agent> <function> <json-args>");
-                std::process::exit(1);
+        match runner.load_agent(package_path).await {
+            Ok(_) => {
+                info!(package_path = %package_path.display(), "Agent package loaded");
             }
-            
-            let agent_name = &args[i + 1];
-            let function_name = &args[i + 2];
-            let json_args = &args[i + 3];
-            
-            let args_value: Value = serde_json::from_str(json_args)
-                .context("Invalid JSON arguments")?;
-            
-            let result = runner.invoke(agent_name, function_name, args_value).await
-                .context("Function invocation failed")?;
-            
-            println!("{}", serde_json::to_string_pretty(&result)?);
-            return Ok(());
-        } else if args[i] == "--a2a-stdio" {
-            a2a_stdio = true;
-        } else {
-            // Load agent package
-            let package_path = Path::new(&args[i]);
-            if !package_path.exists() {
-                eprintln!("Error: Agent package not found: {}", package_path.display());
+            Err(e) => {
+                error!(error = %e, package = %package_path.display(), "Failed to load agent package");
+                eprintln!("Error: Failed to load agent package {}: {}", package_path.display(), e);
                 std::process::exit(1);
-            }
-            
-            match runner.load_agent(package_path).await {
-                Ok(_) => {
-                    info!(package_path = %package_path.display(), "Agent package loaded");
-                }
-                Err(e) => {
-                    error!(error = %e, package = %package_path.display(), "Failed to load agent package");
-                    eprintln!("Error: Failed to load agent package {}: {}", package_path.display(), e);
-                    std::process::exit(1);
-                }
             }
         }
-        i += 1;
+    }
+
+    if let Some((agent_name, function_name, json_args)) = config.invoke {
+        let args_value: Value = serde_json::from_str(&json_args)
+            .context("Invalid JSON arguments")?;
+        let result = runner
+            .invoke(&agent_name, &function_name, args_value)
+            .await
+            .context("Function invocation failed")?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
     }
 
     // If we get here, just loaded agents without invoking
@@ -507,7 +704,7 @@ async fn main() -> anyhow::Result<()> {
         println!("  - {}", agent_name);
     }
 
-    if a2a_stdio {
+    if config.a2a_stdio {
         runner.run_a2a_stdio().await?;
         return Ok(());
     }

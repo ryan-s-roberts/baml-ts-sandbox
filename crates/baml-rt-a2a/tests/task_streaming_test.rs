@@ -1,38 +1,101 @@
-use test_support::common;
 use async_trait::async_trait;
 use baml_rt::a2a_types::{JSONRPCId, JSONRPCRequest, Message, MessageRole, Part, SendMessageRequest};
 use baml_rt::tools::BamlTool;
 use baml_rt::baml::BamlRuntimeManager;
 use baml_rt::{A2aAgent, A2aRequestHandler};
 use serde_json::{json, Value};
-use std::fs;
 use std::collections::HashMap;
 use test_support::common::CalculatorTool;
 
-fn fixture_agent_dir() -> std::path::PathBuf {
-    common::agent_fixture("voidship-rites")
-}
-
 fn fixture_js_code() -> String {
-    let agent_dir = fixture_agent_dir();
-    let dist_path = agent_dir.join("dist").join("index.js");
-    if dist_path.exists() {
-        return fs::read_to_string(&dist_path).expect("fixture JS should be readable");
-    }
-    let src_path = agent_dir.join("src").join("index.ts");
-    fs::read_to_string(&src_path).expect("fixture JS should be readable")
+    r#"
+    globalThis.handle_a2a_request = async function(request) {
+        const method = request?.method;
+        const params = request?.params || {};
+        const message = params.message || {};
+        const text = message.parts?.[0]?.text || "";
+        const messageId = message.messageId || "msg";
+        const contextId = message.contextId || "ctx";
+
+        if (method === "message.send") {
+            if (text.startsWith("long-rite:")) {
+                return {
+                    task: {
+                        id: `rite-task-${messageId}`,
+                        contextId,
+                        metadata: { agent: "test-agent" },
+                        status: { state: "TASK_STATE_WORKING" },
+                        history: []
+                    }
+                };
+            }
+            if (text.startsWith("tool-call:")) {
+                const result = await invokeTool("add_numbers", { a: 2, b: 3 });
+                return {
+                    message: {
+                        messageId: `resp-${messageId}`,
+                        role: "ROLE_AGENT",
+                        parts: [{ text: `sum=${result.result}` }]
+                    }
+                };
+            }
+            if (text.startsWith("baml-tool:")) {
+                const result = await invokeTool("calculate", { expression: { left: 2, operation: "Add", right: 3 } });
+                return {
+                    message: {
+                        messageId: `resp-${messageId}`,
+                        role: "ROLE_AGENT",
+                        parts: [{ text: `sum=${result.result}` }]
+                    }
+                };
+            }
+            return {
+                message: {
+                    messageId: `resp-${messageId}`,
+                    role: "ROLE_AGENT",
+                    parts: [{ text: "ok" }]
+                }
+            };
+        }
+
+        if (method === "message.sendStream") {
+            return [
+                { statusUpdate: { contextId, taskId: `rite-task-${messageId}`, status: { state: "TASK_STATE_WORKING" } } },
+                { artifactUpdate: { contextId, taskId: `rite-task-${messageId}`, artifact: { name: "rite-log", parts: [{ text: "sealed" }] } } }
+            ];
+        }
+
+        if (method === "tasks.subscribe") {
+            const taskId = params.id || `rite-task-${messageId}`;
+            return [
+                { statusUpdate: { contextId, taskId, status: { state: "TASK_STATE_WORKING" } } },
+                { artifactUpdate: { contextId, taskId, artifact: { name: "rite-log", parts: [{ text: "sealed" }] } } }
+            ];
+        }
+
+        return {
+            message: {
+                messageId: `resp-${messageId}`,
+                role: "ROLE_AGENT",
+                parts: [{ text: "unknown" }]
+            }
+        };
+    };
+    "#
+    .to_string()
 }
 
 fn user_message(message_id: &str, text: &str) -> Message {
-    use baml_rt_core::ids::{ContextId, MessageId};
+    use baml_rt_core::ids::{ContextId, ExternalId};
+    use baml_rt_a2a::a2a_types::A2aMessageId;
     Message {
-        message_id: MessageId::from(message_id),
+        message_id: A2aMessageId::incoming(ExternalId::new(message_id)),
         role: MessageRole::String("ROLE_USER".to_string()),
         parts: vec![Part {
             text: Some(text.to_string()),
             ..Part::default()
         }],
-        context_id: Some(ContextId::from("ctx-void-001")),
+        context_id: Some(ContextId::new(1, 1)),
         task_id: None,
         reference_task_ids: Vec::new(),
         extensions: Vec::new(),
@@ -43,8 +106,6 @@ fn user_message(message_id: &str, text: &str) -> Message {
 
 async fn setup_agent() -> A2aAgent {
     let mut manager = BamlRuntimeManager::new().unwrap();
-    let agent_dir = fixture_agent_dir();
-    manager.load_schema(agent_dir.to_str().unwrap()).unwrap();
     manager.map_baml_variant_to_tool("CalculatorTool", "calculate");
     A2aAgent::builder()
         .with_runtime_manager(manager)
@@ -68,7 +129,7 @@ async fn test_message_send_deterministic_task() {
         jsonrpc: "2.0".to_string(),
         method: "message.send".to_string(),
         params: Some(serde_json::to_value(params).unwrap()),
-        id: Some(JSONRPCId::String("req-1".to_string())),
+        id: Some(JSONRPCId::String("corr-3-1".to_string())),
     };
 
     let responses = agent
@@ -97,7 +158,7 @@ async fn test_message_send_stream_emits_updates() {
         jsonrpc: "2.0".to_string(),
         method: "message.sendStream".to_string(),
         params: Some(serde_json::to_value(params).unwrap()),
-        id: Some(JSONRPCId::String("req-2".to_string())),
+        id: Some(JSONRPCId::String("corr-3-2".to_string())),
     };
 
     let responses = agent
@@ -139,7 +200,7 @@ async fn test_tasks_subscribe_streams_incremental_updates() {
         jsonrpc: "2.0".to_string(),
         method: "message.send".to_string(),
         params: Some(serde_json::to_value(params).unwrap()),
-        id: Some(JSONRPCId::String("req-3".to_string())),
+        id: Some(JSONRPCId::String("corr-3-3".to_string())),
     };
     let _ = agent
         .handle_a2a(serde_json::to_value(create_request).unwrap())
@@ -157,7 +218,7 @@ async fn test_tasks_subscribe_streams_incremental_updates() {
         jsonrpc: "2.0".to_string(),
         method: "message.sendStream".to_string(),
         params: Some(serde_json::to_value(stream_params).unwrap()),
-        id: Some(JSONRPCId::String("req-4".to_string())),
+        id: Some(JSONRPCId::String("corr-3-4".to_string())),
     };
     let _ = agent
         .handle_a2a(serde_json::to_value(stream_request).unwrap())
@@ -168,7 +229,7 @@ async fn test_tasks_subscribe_streams_incremental_updates() {
         jsonrpc: "2.0".to_string(),
         method: "tasks.subscribe".to_string(),
         params: Some(json!({ "id": "rite-task-vox-3", "stream": true })),
-        id: Some(JSONRPCId::String("req-5".to_string())),
+        id: Some(JSONRPCId::String("corr-3-5".to_string())),
     };
     let responses = agent
         .handle_a2a(serde_json::to_value(subscribe_request).unwrap())
@@ -244,7 +305,7 @@ async fn test_message_send_tool_calling() {
         jsonrpc: "2.0".to_string(),
         method: "message.send".to_string(),
         params: Some(serde_json::to_value(params).unwrap()),
-        id: Some(JSONRPCId::String("req-6".to_string())),
+        id: Some(JSONRPCId::String("corr-3-6".to_string())),
     };
 
     let responses = agent
@@ -288,7 +349,7 @@ async fn test_message_send_baml_tool_calling() {
         jsonrpc: "2.0".to_string(),
         method: "message.send".to_string(),
         params: Some(serde_json::to_value(params).unwrap()),
-        id: Some(JSONRPCId::String("req-7".to_string())),
+        id: Some(JSONRPCId::String("corr-3-7".to_string())),
     };
 
     let responses = agent

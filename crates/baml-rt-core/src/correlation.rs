@@ -19,7 +19,7 @@ pub fn generate_correlation_id() -> CorrelationId {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     let counter = CORRELATION_COUNTER.fetch_add(1, Ordering::Relaxed);
-    CorrelationId::new(format!("corr-{}-{}", millis, counter))
+    CorrelationId::new(millis, counter)
 }
 
 pub fn current_correlation_id() -> Option<CorrelationId> {

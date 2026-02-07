@@ -39,6 +39,10 @@ opentelemetry_sdk = "0.26"
 tracing-opentelemetry = "0.27"
 tokio-tungstenite = "0.28.0"
 futures-util = "0.3.31"
+text-to-cypher = { version = "0.1", default-features = false }
+testcontainers = "0.23"
+insta = "1.46.3"
+uuid = { version = "1.10", features = ["v4", "serde"] }
 baml-runtime = { git = "https://github.com/BoundaryML/baml", rev = "d2cc1034826f3b56fa0ad3bcb5c4424de2de8b1c" }
 baml-types = { git = "https://github.com/BoundaryML/baml", rev = "d2cc1034826f3b56fa0ad3bcb5c4424de2de8b1c" }
 internal-baml-core = { git = "https://github.com/BoundaryML/baml", rev = "d2cc1034826f3b56fa0ad3bcb5c4424de2de8b1c" }

@@ -1,5 +1,81 @@
+use baml_rt_id::{
+    ProvActivitySemantics, ProvAgentSemantics, ProvConstantActivitySemantics,
+    ProvConstantAgentSemantics, ProvConstantEntitySemantics, ProvConstantIdTemplate,
+    ProvDerivedActivitySemantics, ProvDerivedAgentSemantics, ProvDerivedEntitySemantics,
+    ProvDerivedIdTemplate, ProvEntitySemantics,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
+
+macro_rules! define_prov_id_type {
+    ($(#[$doc:meta])* $name:ident, $sem_trait:ident, $derived_trait:ident, $const_trait:ident) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn derived<S>(input: S::Input<'_>) -> Self
+            where
+                S: $sem_trait + $derived_trait + ProvDerivedIdTemplate,
+            {
+                Self(S::build(input).into_string())
+            }
+
+            pub fn constant<S>() -> Self
+            where
+                S: $sem_trait + $const_trait + ProvConstantIdTemplate,
+            {
+                Self(S::build().as_str().to_string())
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+
+            pub fn into_string(self) -> String {
+                self.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                &self.0
+            }
+        }
+    };
+}
+
+define_prov_id_type!(
+    /// Provenance entity identifier.
+    ProvEntityId,
+    ProvEntitySemantics,
+    ProvDerivedEntitySemantics,
+    ProvConstantEntitySemantics
+);
+
+define_prov_id_type!(
+    /// Provenance activity identifier.
+    ProvActivityId,
+    ProvActivitySemantics,
+    ProvDerivedActivitySemantics,
+    ProvConstantActivitySemantics
+);
+
+define_prov_id_type!(
+    /// Provenance agent identifier.
+    ProvAgentId,
+    ProvAgentSemantics,
+    ProvDerivedAgentSemantics,
+    ProvConstantAgentSemantics
+);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Entity {
@@ -29,12 +105,47 @@ pub struct Agent {
     pub attributes: HashMap<String, serde_json::Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ProvNodeRef {
+    Entity(ProvEntityId),
+    Activity(ProvActivityId),
+    Agent(ProvAgentId),
+}
+
+impl ProvNodeRef {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ProvNodeRef::Entity(_) => "ProvEntity",
+            ProvNodeRef::Activity(_) => "ProvActivity",
+            ProvNodeRef::Agent(_) => "ProvAgent",
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        match self {
+            ProvNodeRef::Entity(id) => id.as_str(),
+            ProvNodeRef::Activity(id) => id.as_str(),
+            ProvNodeRef::Agent(id) => id.as_str(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Used {
     #[serde(rename = "prov:activity")]
-    pub activity: String,
+    pub activity: ProvActivityId,
     #[serde(rename = "prov:entity")]
-    pub entity: String,
+    pub entity: ProvEntityId,
+    #[serde(rename = "prov:role", skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WasAssociatedWith {
+    #[serde(rename = "prov:activity")]
+    pub activity: ProvActivityId,
+    #[serde(rename = "prov:agent")]
+    pub agent: ProvAgentId,
     #[serde(rename = "prov:role", skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
 }
@@ -42,19 +153,20 @@ pub struct Used {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WasGeneratedBy {
     #[serde(rename = "prov:entity")]
-    pub entity: String,
+    pub entity: ProvEntityId,
     #[serde(rename = "prov:activity")]
-    pub activity: String,
+    pub activity: ProvActivityId,
     #[serde(rename = "prov:time", skip_serializing_if = "Option::is_none")]
     pub time_ms: Option<u64>,
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct WasAssociatedWith {
-    #[serde(rename = "prov:activity")]
-    pub activity: String,
-    #[serde(rename = "prov:agent")]
-    pub agent: String,
-    #[serde(rename = "prov:role", skip_serializing_if = "Option::is_none")]
-    pub role: Option<String>,
+pub struct WasDerivedFrom {
+    #[serde(rename = "prov:generatedEntity")]
+    pub generated_entity: ProvEntityId,
+    #[serde(rename = "prov:usedEntity")]
+    pub used_entity: ProvEntityId,
+    #[serde(rename = "prov:activity", skip_serializing_if = "Option::is_none")]
+    pub activity: Option<ProvActivityId>,
+    #[serde(rename = "prov:type", skip_serializing_if = "Option::is_none")]
+    pub prov_type: Option<String>,
 }

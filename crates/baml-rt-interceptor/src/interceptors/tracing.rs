@@ -2,6 +2,9 @@
 //!
 //! This module provides interceptors that emit structured tracing events
 //! for all LLM and tool calls, enabling observability and debugging.
+//!
+//! These spans are children of invoke_function/invoke_baml_function spans and inherit
+//! context automatically through OTEL span nesting - no need to repeat attributes.
 
 use baml_rt_core::Result;
 use crate::interceptor::{
@@ -33,10 +36,10 @@ impl Default for TracingLLMInterceptor {
 #[async_trait]
 impl LLMInterceptor for TracingLLMInterceptor {
     async fn intercept_llm_call(&self, context: &LLMCallContext) -> Result<InterceptorDecision> {
-        // Create a span for this LLM call with structured fields
+        // Create a child span for this LLM call - inherits context from parent automatically
         let span = span!(
             Level::DEBUG,
-            "llm_call",
+            "baml_rt.llm_call",
             client = %context.client,
             model = %context.model,
             function = %context.function_name,
@@ -59,9 +62,10 @@ impl LLMInterceptor for TracingLLMInterceptor {
         result: &Result<Value>,
         duration_ms: u64,
     ) {
+        // Create a child span - inherits context from parent automatically
         let span = span!(
             Level::DEBUG,
-            "llm_call_complete",
+            "baml_rt.llm_call_complete",
             client = %context.client,
             model = %context.model,
             function = %context.function_name,
@@ -111,10 +115,10 @@ impl Default for TracingToolInterceptor {
 #[async_trait]
 impl ToolInterceptor for TracingToolInterceptor {
     async fn intercept_tool_call(&self, context: &ToolCallContext) -> Result<InterceptorDecision> {
-        // Create a span for this tool call with structured fields
+        // Create a child span for this tool call - inherits context from parent automatically
         let span = span!(
             Level::DEBUG,
-            "tool_call",
+            "baml_rt.tool_call",
             tool = %context.tool_name,
             function = ?context.function_name,
             context_id = %context.context_id,
@@ -137,9 +141,10 @@ impl ToolInterceptor for TracingToolInterceptor {
         result: &Result<Value>,
         duration_ms: u64,
     ) {
+        // Create a child span - inherits context from parent automatically
         let span = span!(
             Level::DEBUG,
-            "tool_call_complete",
+            "baml_rt.tool_call_complete",
             tool = %context.tool_name,
             function = ?context.function_name,
             duration_ms = duration_ms,

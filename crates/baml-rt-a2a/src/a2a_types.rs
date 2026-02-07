@@ -1,4 +1,4 @@
-use baml_rt_core::ids::{ArtifactId, ContextId, MessageId, TaskId};
+use baml_rt_core::ids::{ArtifactId, ContextId, DerivedId, ExternalId, MessageId, TaskId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -34,7 +34,7 @@ pub struct JSONRPCSuccessResponse {
     pub id: Option<JSONRPCId>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct JSONRPCError {
     pub code: i32,
     pub message: String,
@@ -42,7 +42,7 @@ pub struct JSONRPCError {
     pub data: Option<Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct JSONRPCErrorResponse {
     pub jsonrpc: String,
     pub error: JSONRPCError,
@@ -101,10 +101,63 @@ pub struct Part {
     pub extra: HashMap<String, Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessageIdKind {
+    Incoming,
+    Outgoing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct A2aMessageId {
+    id: MessageId,
+    kind: MessageIdKind,
+}
+
+impl A2aMessageId {
+    pub fn incoming(id: ExternalId) -> Self {
+        Self { id: MessageId::from_external(id), kind: MessageIdKind::Incoming }
+    }
+
+    pub fn outgoing(id: DerivedId) -> Self {
+        Self { id: MessageId::from_derived(id), kind: MessageIdKind::Outgoing }
+    }
+
+    pub fn as_message_id(&self) -> &MessageId {
+        &self.id
+    }
+
+    pub fn into_message_id(self) -> MessageId {
+        self.id
+    }
+
+    pub fn kind(&self) -> MessageIdKind {
+        self.kind.clone()
+    }
+}
+
+impl Serialize for A2aMessageId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.id.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for A2aMessageId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Ok(A2aMessageId::incoming(ExternalId::new(raw)))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
-    pub message_id: MessageId,
+    pub message_id: A2aMessageId,
     pub role: MessageRole,
     pub parts: Vec<Part>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -153,7 +206,7 @@ pub struct TaskStatus {
     pub extra: HashMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -199,7 +252,7 @@ pub struct SendMessageRequest {
     pub extra: HashMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendMessageResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -210,7 +263,7 @@ pub struct SendMessageResponse {
     pub extra: HashMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetTaskRequest {
     pub id: TaskId,
@@ -222,7 +275,7 @@ pub struct GetTaskRequest {
     pub extra: HashMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListTasksRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -245,7 +298,7 @@ pub struct ListTasksRequest {
     pub extra: HashMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListTasksResponse {
     #[serde(default)]
@@ -260,7 +313,7 @@ pub struct ListTasksResponse {
     pub extra: HashMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CancelTaskRequest {
     pub id: TaskId,
@@ -270,7 +323,7 @@ pub struct CancelTaskRequest {
     pub extra: HashMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubscribeToTaskRequest {
     pub id: TaskId,

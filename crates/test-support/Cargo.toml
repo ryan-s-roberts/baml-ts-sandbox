@@ -6,8 +6,10 @@ authors = { workspace = true }
 
 [dependencies]
 baml-rt = { path = "../baml-rt" }
+baml-rt-core = { path = "../baml-rt-core" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 dotenvy = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true }

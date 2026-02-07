@@ -4,6 +4,7 @@
 //! from the BAML compiler.
 
 use baml_rt_core::{BamlRtError, Result};
+use baml_rt_core::context;
 use baml_rt_tools::{ToolMapper, ToolRegistry};
 use baml_rt_interceptor::{InterceptorDecision, InterceptorRegistry};
 use crate::baml_collector::BamlLLMCollector;
@@ -20,7 +21,6 @@ use tokio::sync::Mutex;
 /// BAML execution engine that executes BAML IL
 pub struct BamlExecutor {
     runtime: Arc<BamlRuntime>,
-    ctx_manager: RuntimeContextManager,
     tool_registry: Arc<Mutex<ToolRegistry>>,
     tool_mapper: Arc<StdMutex<ToolMapper>>,
 }
@@ -57,17 +57,12 @@ impl BamlExecutor {
         let feature_flags = internal_baml_core::feature_flags::FeatureFlags::default();
 
         let runtime = BamlRuntime::from_directory(baml_src_dir, env_vars, feature_flags)
-            .map_err(|e| BamlRtError::BamlRuntime(format!("Failed to load BAML runtime: {}", e)))?;
-
-        // Create context manager
-        let ctx_manager = runtime.create_ctx_manager(
-            BamlValue::String("rust".to_string()),
-            None, // baml_src_reader
-        );
+            .map_err(|e| BamlRtError::RuntimeLoadFailed {
+                source: e,
+            })?;
 
         Ok(Self {
             runtime: Arc::new(runtime),
-            ctx_manager,
             tool_registry,
             tool_mapper,
         })
@@ -115,12 +110,13 @@ impl BamlExecutor {
         });
 
         // Pre-execution interception: intercept LLM calls before they're sent
+        let ctx_manager = self.create_ctx_manager_for_current_scope()?;
         if let Some(ref registry) = interceptor_registry {
             match intercept_llm_call_pre_execution(
                 &self.runtime,
                 function_name,
                 &params,
-                &self.ctx_manager,
+                &ctx_manager,
                 registry,
                 env_vars.clone(),
                 false, // stream = false for regular calls
@@ -153,7 +149,7 @@ impl BamlExecutor {
         let (result, _call_id) = self.runtime.call_function(
             function_name.to_string(),
             &params,
-            &self.ctx_manager,
+            &ctx_manager,
             None, // type_builder
             None, // client_registry
             collectors, // collectors - now wired up to track execution
@@ -216,6 +212,7 @@ impl BamlExecutor {
 
         // Convert JSON args to BamlValue map
         let params = self.json_to_baml_map(&args)?;
+        let ctx_manager = self.create_ctx_manager_for_current_scope()?;
 
         // Create stream function call
         // Load environment variables for API keys
@@ -234,7 +231,7 @@ impl BamlExecutor {
         let stream = self.runtime.stream_function(
             function_name.to_string(),
             &params,
-            &self.ctx_manager,
+            &ctx_manager,
             None, // type_builder
             None, // client_registry
             None, // collectors
@@ -247,9 +244,26 @@ impl BamlExecutor {
         Ok(stream)
     }
 
-    /// Get a reference to the context manager (needed for streaming)
-    pub fn ctx_manager(&self) -> &RuntimeContextManager {
-        &self.ctx_manager
+    /// Create a context manager tied to the current runtime scope.
+    pub fn create_ctx_manager_for_current_scope(&self) -> Result<RuntimeContextManager> {
+        let context_id = context::current_context_id();
+        let message_id = context::current_message_id();
+        let task_id = context::current_task_id();
+        
+        let context_id = context_id.ok_or_else(|| {
+            tracing::warn!(
+                context_id = "none",
+                message_id = %message_id.as_ref().map(|id| id.as_str()).unwrap_or("none"),
+                task_id = %task_id.as_ref().map(|id| id.as_str()).unwrap_or("none"),
+                "missing context_id for BAML context manager"
+            );
+            BamlRtError::InvalidArgument(
+                "missing context_id for BAML context manager".to_string(),
+            )
+        })?;
+        
+        Ok(self.runtime
+            .create_ctx_manager(BamlValue::String(context_id.as_str().to_string()), None))
     }
 
     /// List all available function names from the loaded BAML runtime

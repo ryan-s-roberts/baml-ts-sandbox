@@ -8,7 +8,7 @@ use crate::a2a_types::{
 };
 use baml_rt_core::{BamlRtError, Result};
 use baml_rt_core::context;
-use baml_rt_core::ids::ContextId;
+use baml_rt_core::ids::{ContextId, ExternalId, MessageId, TaskId};
 use serde_json::{json, Map, Value};
 
 const JSONRPC_VERSION: &str = "2.0";
@@ -61,6 +61,8 @@ pub struct A2aRequest {
     pub params: Value,
     pub is_stream: bool,
     pub context_id: Option<ContextId>,
+    pub message_id: Option<MessageId>,
+    pub task_id: Option<TaskId>,
 }
 
 impl A2aRequest {
@@ -77,6 +79,8 @@ impl A2aRequest {
         let method: A2aMethod = request.method.parse()?;
         let mut params_value = request.params.unwrap_or(Value::Null);
         let mut context_id = None;
+        let mut message_id = None;
+        let mut task_id = None;
         let is_stream = match method {
             A2aMethod::MessageSend => {
                 let mut params: SendMessageRequest =
@@ -85,6 +89,8 @@ impl A2aRequest {
                     params.message.context_id = Some(context::generate_context_id());
                 }
                 context_id = params.message.context_id.clone();
+                message_id = Some(params.message.message_id.as_message_id().clone());
+                task_id = params.message.task_id.clone();
                 params_value =
                     serde_json::to_value(&params).map_err(BamlRtError::Json)?;
                 params_value = augment_message_params(params_value, &params.message);
@@ -97,6 +103,8 @@ impl A2aRequest {
                     params.message.context_id = Some(context::generate_context_id());
                 }
                 context_id = params.message.context_id.clone();
+                message_id = Some(params.message.message_id.as_message_id().clone());
+                task_id = params.message.task_id.clone();
                 params_value =
                     serde_json::to_value(&params).map_err(BamlRtError::Json)?;
                 params_value = augment_message_params(params_value, &params.message);
@@ -106,12 +114,21 @@ impl A2aRequest {
             | A2aMethod::TasksList
             | A2aMethod::TasksCancel
             | A2aMethod::TasksSubscribe => {
-                if method == A2aMethod::TasksList {
-                    if let Ok(params) =
+                if matches!(method, A2aMethod::TasksGet | A2aMethod::TasksCancel)
+                    && let Some(id) = params_value.get("id").and_then(Value::as_str)
+                {
+                    task_id = Some(TaskId::from_external(ExternalId::new(id)));
+                }
+                if method == A2aMethod::TasksSubscribe
+                    && let Some(id) = params_value.get("id").and_then(Value::as_str)
+                {
+                    task_id = Some(TaskId::from_external(ExternalId::new(id)));
+                }
+                if method == A2aMethod::TasksList
+                    && let Ok(params) =
                         serde_json::from_value::<ListTasksRequest>(params_value.clone())
-                    {
-                        context_id = params.context_id;
-                    }
+                {
+                    context_id = params.context_id;
                 }
                 params_value
                     .get("stream")
@@ -133,6 +150,8 @@ impl A2aRequest {
             params: params_value,
             is_stream,
             context_id,
+            message_id,
+            task_id,
         })
     }
 
@@ -400,6 +419,7 @@ mod tests {
                             task: {
                                 id: "task-1",
                                 contextId: "ctx-1",
+                                metadata: { agent: "test-agent" },
                                 status: { state: "TASK_STATE_WORKING" },
                                 history: []
                             }
@@ -460,9 +480,10 @@ mod tests {
     }
 
     fn user_message(message_id: &str, text: &str) -> Message {
-        use baml_rt_core::ids::MessageId;
+        use crate::a2a_types::A2aMessageId;
+        use baml_rt_core::ids::ExternalId;
         Message {
-            message_id: MessageId::from(message_id),
+            message_id: A2aMessageId::incoming(ExternalId::new(message_id)),
             role: MessageRole::String(ROLE_USER.to_string()),
             parts: vec![Part {
                 text: Some(text.to_string()),
@@ -492,7 +513,7 @@ mod tests {
             jsonrpc: "2.0".to_string(),
             method: "message.send".to_string(),
             params: Some(serde_json::to_value(params).expect("serialize params")),
-            id: Some(JSONRPCId::String("req-1".to_string())),
+            id: Some(JSONRPCId::String("corr-1-10".to_string())),
         };
         let request_value = serde_json::to_value(request).expect("serialize request");
 
@@ -532,7 +553,7 @@ mod tests {
             jsonrpc: "2.0".to_string(),
             method: "message.send".to_string(),
             params: Some(serde_json::to_value(params).expect("serialize params")),
-            id: Some(JSONRPCId::String("span-req".to_string())),
+            id: Some(JSONRPCId::String("corr-1-19".to_string())),
         };
         let request_value = serde_json::to_value(request).expect("serialize request");
 
@@ -542,7 +563,7 @@ mod tests {
         let span = find_span(&spans, "baml_rt.a2a_request")
             .expect("expected baml_rt.a2a_request span");
         assert_eq!(attr_value(span, "method").as_deref(), Some("message.send"));
-        assert_eq!(attr_value(span, "correlation_id").as_deref(), Some("span-req"));
+        assert_eq!(attr_value(span, "correlation_id").as_deref(), Some("corr-1-19"));
     }
 
     #[tokio::test]
@@ -561,7 +582,7 @@ mod tests {
             jsonrpc: "2.0".to_string(),
             method: "message.sendStream".to_string(),
             params: Some(serde_json::to_value(params).expect("serialize params")),
-            id: Some(JSONRPCId::String("span-stream".to_string())),
+            id: Some(JSONRPCId::String("corr-1-20".to_string())),
         };
         let request_value = serde_json::to_value(request).expect("serialize request");
 
@@ -571,7 +592,7 @@ mod tests {
         let span = find_span(&spans, "baml_rt.a2a_stream")
             .expect("expected baml_rt.a2a_stream span");
         assert_eq!(attr_value(span, "method").as_deref(), Some("message.sendStream"));
-        assert_eq!(attr_value(span, "correlation_id").as_deref(), Some("span-stream"));
+        assert_eq!(attr_value(span, "correlation_id").as_deref(), Some("corr-1-20"));
     }
 
     #[tokio::test]
@@ -589,7 +610,7 @@ mod tests {
             jsonrpc: "2.0".to_string(),
             method: "message.sendStream".to_string(),
             params: Some(serde_json::to_value(params).expect("serialize params")),
-            id: Some(JSONRPCId::String("stream-1".to_string())),
+            id: Some(JSONRPCId::String("corr-1-11".to_string())),
         };
         let request_value = serde_json::to_value(request).expect("serialize request");
 
@@ -627,7 +648,7 @@ mod tests {
             jsonrpc: "2.0".to_string(),
             method: "message.send".to_string(),
             params: Some(params_value),
-            id: Some(JSONRPCId::String("stream-2".to_string())),
+            id: Some(JSONRPCId::String("corr-1-12".to_string())),
         };
         let request_value = serde_json::to_value(request).expect("serialize request");
 
@@ -661,7 +682,7 @@ mod tests {
             jsonrpc: "2.0".to_string(),
             method: "message.send".to_string(),
             params: Some(serde_json::to_value(params).expect("serialize params")),
-            id: Some(JSONRPCId::String("task-create".to_string())),
+            id: Some(JSONRPCId::String("corr-1-13".to_string())),
         };
         let create_value = serde_json::to_value(create_request).expect("serialize request");
         let create_responses = agent.handle_a2a(create_value).await.expect("create task");
@@ -680,7 +701,7 @@ mod tests {
             jsonrpc: "2.0".to_string(),
             method: "tasks.get".to_string(),
             params: Some(json!({ "id": task_id })),
-            id: Some(JSONRPCId::String("task-get".to_string())),
+            id: Some(JSONRPCId::String("corr-1-14".to_string())),
         };
         let responses = agent
             .handle_a2a(serde_json::to_value(get_request).expect("serialize request"))
@@ -693,7 +714,7 @@ mod tests {
             jsonrpc: "2.0".to_string(),
             method: "tasks.list".to_string(),
             params: Some(json!({})),
-            id: Some(JSONRPCId::String("task-list".to_string())),
+            id: Some(JSONRPCId::String("corr-1-15".to_string())),
         };
         let responses = agent
             .handle_a2a(serde_json::to_value(list_request).expect("serialize request"))
@@ -712,7 +733,7 @@ mod tests {
             jsonrpc: "2.0".to_string(),
             method: "tasks.cancel".to_string(),
             params: Some(json!({ "id": task_id })),
-            id: Some(JSONRPCId::String("task-cancel".to_string())),
+            id: Some(JSONRPCId::String("corr-1-16".to_string())),
         };
         let responses = agent
             .handle_a2a(serde_json::to_value(cancel_request).expect("serialize request"))
@@ -742,7 +763,7 @@ mod tests {
             jsonrpc: "2.0".to_string(),
             method: "message.send".to_string(),
             params: Some(serde_json::to_value(params).expect("serialize params")),
-            id: Some(JSONRPCId::String("task-create-stream".to_string())),
+            id: Some(JSONRPCId::String("corr-1-17".to_string())),
         };
         let create_value = serde_json::to_value(create_request).expect("serialize request");
         let create_responses = agent.handle_a2a(create_value).await.expect("create task");
@@ -761,7 +782,7 @@ mod tests {
             jsonrpc: "2.0".to_string(),
             method: "tasks.subscribe".to_string(),
             params: Some(json!({ "id": task_id, "stream": true })),
-            id: Some(JSONRPCId::String("task-subscribe".to_string())),
+            id: Some(JSONRPCId::String("corr-1-18".to_string())),
         };
         let responses = agent
             .handle_a2a(serde_json::to_value(subscribe_request).expect("serialize request"))

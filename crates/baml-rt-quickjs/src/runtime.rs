@@ -68,10 +68,10 @@ pub struct RuntimeConfig {
     /// Path to the BAML schema directory
     pub schema_path: Option<PathBuf>,
     
-    /// Whether to enable QuickJS bridge
-    pub enable_quickjs: bool,
+    /// Agent ID - REQUIRED for QuickJS bridge
+    pub agent_id: Option<baml_rt_core::ids::AgentId>,
     
-    /// QuickJS-specific configuration (only used if enable_quickjs is true)
+    /// QuickJS-specific configuration
     pub quickjs_config: QuickJSConfig,
     
     /// Additional environment variables to pass to BAML runtime
@@ -96,12 +96,6 @@ impl RuntimeConfig {
         self
     }
 
-    /// Enable QuickJS bridge
-    pub fn with_quickjs(mut self, enable: bool) -> Self {
-        self.enable_quickjs = enable;
-        self
-    }
-
     /// Configure QuickJS runtime options
     /// 
     /// This allows fine-grained control over the QuickJS runtime behavior,
@@ -123,8 +117,8 @@ pub struct Runtime {
     /// The BAML runtime manager
     pub baml_manager: Arc<Mutex<BamlRuntimeManager>>,
     
-    /// The QuickJS bridge (if enabled)
-    pub quickjs_bridge: Option<Arc<Mutex<QuickJSBridge>>>,
+    /// The QuickJS bridge (always enabled)
+    pub quickjs_bridge: Arc<Mutex<QuickJSBridge>>,
     
     /// Runtime configuration
     pub config: RuntimeConfig,
@@ -136,16 +130,9 @@ impl Runtime {
         self.baml_manager.clone()
     }
 
-    /// Get the QuickJS bridge (if enabled)
-    pub fn quickjs_bridge(&self) -> Option<Arc<Mutex<QuickJSBridge>>> {
+    /// Get the QuickJS bridge
+    pub fn quickjs_bridge(&self) -> Arc<Mutex<QuickJSBridge>> {
         self.quickjs_bridge.clone()
-    }
-
-    /// Get mutable access to QuickJS bridge
-    pub fn quickjs_bridge_mut(&mut self) -> Option<&mut QuickJSBridge> {
-        // This requires interior mutability or restructuring
-        // For now, return None if we want to avoid unsafe
-        None
     }
 }
 
@@ -168,9 +155,9 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Enable QuickJS bridge
-    pub fn with_quickjs(mut self, enable: bool) -> Self {
-        self.config.enable_quickjs = enable;
+    /// Set agent ID - REQUIRED
+    pub fn with_agent_id(mut self, agent_id: baml_rt_core::ids::AgentId) -> Self {
+        self.config.agent_id = Some(agent_id);
         self
     }
 
@@ -185,8 +172,9 @@ impl RuntimeBuilder {
     /// use std::time::Duration;
     /// 
     /// # tokio_test::block_on(async {
+    /// use baml_rt_core::ids::{AgentId, UuidId};
     /// let runtime = RuntimeBuilder::new()
-    ///     .with_quickjs(true)
+    ///     .with_agent_id(AgentId::from_uuid(UuidId::parse_str("00000000-0000-0000-0000-000000000008").unwrap()))
     ///     .with_quickjs_config(
     ///         QuickJSConfig::new()
     ///             .with_memory_limit(Some(64 * 1024 * 1024)) // 64MB limit
@@ -324,23 +312,34 @@ impl RuntimeBuilder {
 
         let baml_manager = Arc::new(Mutex::new(baml_manager));
 
-        // Create QuickJS bridge if enabled
-        let quickjs_config_clone = self.config.quickjs_config.clone();
-        let quickjs_bridge = if self.config.enable_quickjs {
-            let mut bridge = QuickJSBridge::new_with_config(
-                baml_manager.clone(),
-                quickjs_config_clone,
-            ).await?;
-            bridge.register_baml_functions().await?;
-            Some(Arc::new(Mutex::new(bridge)))
-        } else {
-            None
-        };
+        // Extract config fields before moving - clone quickjs_config to avoid partial move
+        let RuntimeConfig {
+            agent_id,
+            quickjs_config,
+            ..
+        } = &self.config;
+        let quickjs_config = quickjs_config.clone();
+        let agent_id = agent_id.clone();
+        let config = self.config; // Move config here
+        
+        // Create QuickJS bridge (always enabled)
+        let agent_id = agent_id.ok_or_else(|| {
+            BamlRtError::InvalidArgument(
+                "agent_id is REQUIRED. Call with_agent_id() before build().".to_string()
+            )
+        })?;
+        let mut bridge = QuickJSBridge::new_with_config(
+            baml_manager.clone(),
+            agent_id,
+            quickjs_config,
+        ).await?;
+        bridge.register_baml_functions().await?;
+        let quickjs_bridge = Arc::new(Mutex::new(bridge));
 
         Ok(Runtime {
             baml_manager,
             quickjs_bridge,
-            config: self.config,
+            config,
         })
     }
 }

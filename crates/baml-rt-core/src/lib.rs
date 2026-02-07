@@ -7,4 +7,4 @@ pub mod ids;
 pub mod types;
 
 pub use error::{BamlRtError, Result};
-pub use ids::{ArtifactId, ContextId, CorrelationId, EventId, MessageId, TaskId};
+pub use ids::{AgentId, ArtifactId, ContextId, CorrelationId, EventId, MessageId, TaskId};

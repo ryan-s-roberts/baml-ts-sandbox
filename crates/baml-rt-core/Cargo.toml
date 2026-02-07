@@ -5,6 +5,7 @@ edition = { workspace = true }
 authors = { workspace = true }
 
 [dependencies]
+baml-rt-id = { path = "../baml-rt-id" }
 baml-runtime = { workspace = true }
 baml-types = { workspace = true }
 internal-baml-core = { workspace = true }

@@ -10,10 +10,21 @@
  
  [dependencies]
  baml-rt-core = { path = "../baml-rt-core" }
+baml-rt-id = { path = "../baml-rt-id" }
  baml-rt-interceptor = { path = "../baml-rt-interceptor" }
- serde = { workspace = true }
- serde_json = { workspace = true }
- tokio = { workspace = true }
- async-trait = { workspace = true }
- thiserror = { workspace = true }
- tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+text-to-cypher = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+testcontainers = { workspace = true }
+insta = { workspace = true, features = ["json"] }
+
+[[bin]]
+name = "validate_prov"
+path = "../../validate_prov.rs"

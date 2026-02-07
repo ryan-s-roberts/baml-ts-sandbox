@@ -9,6 +9,8 @@
 
 
 use baml_rt::tools::BamlTool;
+use baml_rt_core::context;
+use baml_rt_core::ids::{AgentId, UuidId};
 use serde_json::json;
 use async_trait::async_trait;
 
@@ -221,11 +223,20 @@ async fn test_e2e_trait_tool_llm_calling() {
     {
         let manager = baml_manager.lock().await;
         
-        let result = manager.invoke_function(
-            "ChooseTool",
-            json!({"message": "What is 42 times 7?"})
-        ).await;
-        
-        assert!(result.is_ok());
+        let agent_id = AgentId::from_uuid(
+            UuidId::parse_str("00000000-0000-0000-0000-000000000010")
+                .expect("valid test uuid"),
+        );
+        let result = context::with_agent_id(agent_id, async {
+            manager
+                .invoke_function("ChooseTool", json!({"user_message": "What is 42 times 7?"}))
+                .await
+        })
+        .await;
+
+        match result {
+            Ok(_) => {}
+            Err(err) => panic!("invoke_function failed: {err}"),
+        }
     }
 }

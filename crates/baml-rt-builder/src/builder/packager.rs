@@ -3,11 +3,13 @@
 use baml_rt_core::{BamlRtError, Result};
 use crate::builder::traits::{Packager, FileSystem};
 use crate::builder::types::{AgentDir, BuildDir};
+use serde_json::Value;
 use std::fs;
 use std::path::Path;
 use tar::{Builder, Header};
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use uuid::Uuid;
 
 /// Standard packager implementation
 pub struct StdPackager<FS> {
@@ -31,10 +33,15 @@ impl<FS: FileSystem> Packager for StdPackager<FS> {
         let enc = GzEncoder::new(tar_gz, Compression::default());
         let mut tar = Builder::new(enc);
 
-        // Add manifest.json
+        // Add manifest.json (ensure signature exists)
         let manifest_path = agent_dir.as_path().join("manifest.json");
         if manifest_path.exists() {
             let content = fs::read_to_string(&manifest_path).map_err(BamlRtError::Io)?;
+            let mut manifest: Value = serde_json::from_str(&content).map_err(BamlRtError::Json)?;
+            if manifest.get("signature").and_then(|v| v.as_str()).is_none() {
+                manifest["signature"] = Value::String(Uuid::new_v4().to_string());
+            }
+            let content = serde_json::to_string_pretty(&manifest).map_err(BamlRtError::Json)?;
             let mut header = Header::new_gnu();
             header.set_path("manifest.json")
                 .map_err(BamlRtError::TarHeaderPath)?;

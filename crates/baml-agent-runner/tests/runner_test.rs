@@ -49,7 +49,8 @@ fn create_test_agent_package(output_path: &Path) -> Result<(), Box<dyn std::erro
         "name": "test-agent",
         "description": "Test agent package for E2E testing",
         "entry_point": "dist/index.js",
-        "runtime_version": "0.1.0"
+        "runtime_version": "0.1.0",
+        "signature": "test-agent@1.0.0"
     });
     fs::write(temp_dir.join("manifest.json"), serde_json::to_string_pretty(&manifest)?)?;
 
@@ -115,15 +116,16 @@ impl BamlTool for AddNumbersTool {
 }
 
 fn user_message(message_id: &str, text: &str) -> Message {
-    use baml_rt_core::ids::{ContextId, MessageId};
+    use baml_rt_core::ids::{ContextId, ExternalId};
+    use baml_rt_a2a::a2a_types::A2aMessageId;
     Message {
-        message_id: MessageId::from(message_id),
+        message_id: A2aMessageId::incoming(ExternalId::new(message_id)),
         role: MessageRole::String("ROLE_USER".to_string()),
         parts: vec![Part {
             text: Some(text.to_string()),
             ..Part::default()
         }],
-        context_id: Some(ContextId::from("ctx-void-001")),
+        context_id: Some(ContextId::new(1, 1)),
         task_id: None,
         reference_task_ids: Vec::new(),
         extensions: Vec::new(),
@@ -347,7 +349,7 @@ async fn test_e2e_voidship_agent_features() {
         jsonrpc: "2.0".to_string(),
         method: "message.send".to_string(),
         params: Some(serde_json::to_value(params).unwrap()),
-        id: Some(JSONRPCId::String("req-void-baml".to_string())),
+        id: Some(JSONRPCId::String("corr-1-1".to_string())),
     };
     let responses = agent
         .handle_a2a(serde_json::to_value(request).unwrap())
@@ -380,7 +382,7 @@ async fn test_e2e_voidship_agent_features() {
         jsonrpc: "2.0".to_string(),
         method: "message.send".to_string(),
         params: Some(serde_json::to_value(params).unwrap()),
-        id: Some(JSONRPCId::String("req-void-1".to_string())),
+        id: Some(JSONRPCId::String("corr-1-2".to_string())),
     };
     let responses = agent
         .handle_a2a(serde_json::to_value(request).unwrap())
@@ -406,7 +408,7 @@ async fn test_e2e_voidship_agent_features() {
         jsonrpc: "2.0".to_string(),
         method: "message.send".to_string(),
         params: Some(serde_json::to_value(params).unwrap()),
-        id: Some(JSONRPCId::String("req-void-2".to_string())),
+        id: Some(JSONRPCId::String("corr-1-3".to_string())),
     };
     let responses = agent
         .handle_a2a(serde_json::to_value(request).unwrap())
@@ -439,7 +441,7 @@ async fn test_e2e_voidship_agent_features() {
         jsonrpc: "2.0".to_string(),
         method: "message.sendStream".to_string(),
         params: Some(serde_json::to_value(params).unwrap()),
-        id: Some(JSONRPCId::String("req-void-3".to_string())),
+        id: Some(JSONRPCId::String("corr-1-4".to_string())),
     };
     let responses = agent
         .handle_a2a(serde_json::to_value(request).unwrap())
@@ -468,7 +470,7 @@ async fn test_e2e_voidship_agent_features() {
         jsonrpc: "2.0".to_string(),
         method: "tasks.subscribe".to_string(),
         params: Some(json!({ "id": "rite-task-vox-1", "stream": true })),
-        id: Some(JSONRPCId::String("req-void-4".to_string())),
+        id: Some(JSONRPCId::String("corr-1-5".to_string())),
     };
     let responses = agent
         .handle_a2a(serde_json::to_value(subscribe_request).unwrap())
@@ -490,7 +492,7 @@ async fn test_e2e_voidship_agent_features() {
         jsonrpc: "2.0".to_string(),
         method: "tasks.cancel".to_string(),
         params: Some(json!({ "id": "rite-task-vox-1" })),
-        id: Some(JSONRPCId::String("req-void-5".to_string())),
+        id: Some(JSONRPCId::String("corr-1-6".to_string())),
     };
     let _ = agent
         .handle_a2a(serde_json::to_value(cancel_request).unwrap())
@@ -501,7 +503,7 @@ async fn test_e2e_voidship_agent_features() {
         jsonrpc: "2.0".to_string(),
         method: "tasks.subscribe".to_string(),
         params: Some(json!({ "id": "rite-task-vox-1", "stream": true })),
-        id: Some(JSONRPCId::String("req-void-6".to_string())),
+        id: Some(JSONRPCId::String("corr-1-7".to_string())),
     };
     let responses = agent
         .handle_a2a(serde_json::to_value(subscribe_request).unwrap())

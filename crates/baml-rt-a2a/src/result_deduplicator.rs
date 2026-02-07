@@ -33,6 +33,12 @@ impl HashResultDeduplicator {
     }
 }
 
+impl Default for HashResultDeduplicator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl ResultDeduplicator for HashResultDeduplicator {
     async fn should_process(&self, value: &Value) -> bool {

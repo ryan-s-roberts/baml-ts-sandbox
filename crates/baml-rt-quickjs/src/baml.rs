@@ -10,7 +10,7 @@ use baml_rt_core::correlation::current_correlation_id;
 use baml_rt_core::context;
 use baml_rt_observability::metrics;
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex as TokioMutex;
@@ -249,11 +249,17 @@ impl BamlRuntimeManager {
 
         let start = Instant::now();
         let correlation_id = current_correlation_id();
-        let metadata = if let Some(correlation_id) = correlation_id {
-            json!({ "correlation_id": correlation_id })
-        } else {
-            json!({})
-        };
+        let mut metadata_map = serde_json::Map::new();
+        if let Some(correlation_id) = correlation_id {
+            metadata_map.insert(
+                "correlation_id".to_string(),
+                Value::String(correlation_id.to_string()),
+            );
+        }
+        if let Some(message_id) = context::current_message_id() {
+            metadata_map.insert("message_id".to_string(), Value::String(message_id.as_str().to_string()));
+        }
+        let metadata = Value::Object(metadata_map);
 
         // Build context for interceptors
         let context = ToolCallContext {

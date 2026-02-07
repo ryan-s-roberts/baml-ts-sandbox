@@ -10,6 +10,8 @@ use tokio::sync::Mutex;
 use std::time::Duration;
 
 use test_support::common::{require_api_key, setup_baml_runtime_manager_default};
+use baml_rt_core::context;
+use baml_rt_core::ids::{AgentId, UuidId};
 /// Test interceptor that tracks pre-execution calls
 struct PreExecutionTracker {
     pre_execution_calls: Arc<Mutex<Vec<LLMCallContext>>>,
@@ -162,6 +164,17 @@ impl LLMInterceptor for CombinedTracker {
     }
 }
 
+async fn with_test_agent_scope<F, T>(fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    let agent_id = AgentId::from_uuid(
+        UuidId::parse_str("00000000-0000-0000-0000-000000000001")
+            .expect("valid test uuid"),
+    );
+    context::with_agent_id(agent_id, fut).await
+}
+
 #[tokio::test]
 async fn test_pre_execution_interception_integration() {
     // This test verifies that pre-execution interception is called
@@ -178,10 +191,13 @@ async fn test_pre_execution_interception_integration() {
     
     // Execute a BAML function that would trigger build_request
     // Note: Even if the actual LLM call fails (no API key), build_request should still be called
-    let result = baml_manager.invoke_function(
-        "SimpleGreeting",
-        serde_json::json!({"name": "Integration Test"})
-    ).await;
+    let result = with_test_agent_scope(async {
+        baml_manager.invoke_function(
+            "SimpleGreeting",
+            serde_json::json!({"name": "Integration Test"})
+        ).await
+    }).await;
+
     
     // Wait for async operations
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -230,10 +246,13 @@ async fn test_post_execution_interception_integration() {
     baml_manager.register_llm_interceptor(post_tracker).await;
     
     // Execute a BAML function
-    let result = baml_manager.invoke_function(
-        "SimpleGreeting",
-        serde_json::json!({"name": "Integration Test"})
-    ).await;
+    let result = with_test_agent_scope(async {
+        baml_manager.invoke_function(
+            "SimpleGreeting",
+            serde_json::json!({"name": "Integration Test"})
+        ).await
+    }).await;
+
     
     // Wait for post-execution notifications (collector processes trace events)
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -286,10 +305,13 @@ async fn test_blocking_interception_integration() {
     
     // Try to execute a BAML function
     // The interceptor should block if the model/client matches
-    let result = baml_manager.invoke_function(
-        "SimpleGreeting",
-        serde_json::json!({"name": "Blocked Test"})
-    ).await;
+    let result = with_test_agent_scope(async {
+        baml_manager.invoke_function(
+            "SimpleGreeting",
+            serde_json::json!({"name": "Blocked Test"})
+        ).await
+    }).await;
+
     
     // Wait a bit
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -337,10 +359,13 @@ async fn test_pre_and_post_execution_together_integration() {
     baml_manager.register_llm_interceptor(combined_tracker).await;
     
     // Execute a BAML function
-    let result = baml_manager.invoke_function(
-        "SimpleGreeting",
-        serde_json::json!({"name": "Combined Test"})
-    ).await;
+    let result = with_test_agent_scope(async {
+        baml_manager.invoke_function(
+            "SimpleGreeting",
+            serde_json::json!({"name": "Combined Test"})
+        ).await
+    }).await;
+
     
     // Wait for all async operations
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -405,10 +430,13 @@ async fn test_multiple_interceptors_integration() {
     baml_manager.register_llm_interceptor(pre_tracker2).await;
     
     // Execute a BAML function
-    let _result = baml_manager.invoke_function(
-        "SimpleGreeting",
-        serde_json::json!({"name": "Multiple Test"})
-    ).await;
+    let _result = with_test_agent_scope(async {
+        baml_manager.invoke_function(
+            "SimpleGreeting",
+            serde_json::json!({"name": "Multiple Test"})
+        ).await
+    }).await;
+
     
     // Wait for async operations
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -516,10 +544,13 @@ async fn test_e2e_llm_interceptor_with_baml_execution() {
     
     // Execute a BAML function that makes an LLM call
     tracing::info!("Calling SimpleGreeting BAML function (should trigger LLM interceptor)");
-    let result = baml_manager.invoke_function(
-        "SimpleGreeting",
-        serde_json::json!({"name": "E2E Test"})
-    ).await;
+    let result = with_test_agent_scope(async {
+        baml_manager.invoke_function(
+            "SimpleGreeting",
+            serde_json::json!({"name": "E2E Test"})
+        ).await
+    }).await;
+
     
     // Verify the function executed successfully
     assert!(result.is_ok(), "BAML function should execute successfully");

@@ -17,12 +17,13 @@ async-trait = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 opentelemetry = { workspace = true }
-opentelemetry_sdk = { workspace = true }
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
 tracing-subscriber = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 test-support = { path = "../test-support" }
 baml-rt = { path = "../baml-rt" }
-insta = "1.46.3"
+insta = { workspace = true }

@@ -8,16 +8,22 @@ use baml_rt_core::{BamlRtError, Result};
 use crate::js_value_converter::value_to_js_value_facade;
 use baml_rt_core::correlation;
 use baml_rt_core::context;
-use baml_rt_core::ids::ContextId;
+use baml_rt_core::ids::{ContextId, ExternalId, MessageId, TaskId};
 use quickjs_runtime::builder::QuickJsRuntimeBuilder;
 use quickjs_runtime::facades::QuickJsRuntimeFacade;
 use quickjs_runtime::jsutils::Script;
 use quickjs_runtime::quickjsrealmadapter::QuickJsRealmAdapter;
 use quickjs_runtime::values::JsValueFacade;
-use serde_json::Value;
+use serde_json::{json, Value};
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+
+/// Helper function to serialize an ID to a JSON string for JavaScript prelude code.
+fn serialize_id(id: &impl Serialize) -> Result<String> {
+    serde_json::to_string(id).map_err(BamlRtError::Json)
+}
 
 /// Bridge between QuickJS JavaScript runtime and BAML functions
 /// 
@@ -27,21 +33,31 @@ pub struct QuickJSBridge {
     runtime: QuickJsRuntimeFacade,
     baml_manager: Arc<Mutex<BamlRuntimeManager>>,
     js_tools: HashSet<String>, // Track JavaScript-only tools
+    agent_id: baml_rt_core::ids::AgentId, // REQUIRED - agent_id is never optional
 }
 
 impl QuickJSBridge {
     /// Create a new QuickJS bridge with default configuration
-    pub async fn new(baml_manager: Arc<Mutex<BamlRuntimeManager>>) -> Result<Self> {
-        Self::new_with_config(baml_manager, crate::runtime::QuickJSConfig::default()).await
+    /// 
+    /// # Arguments
+    /// * `baml_manager` - The BAML runtime manager to use
+    /// * `agent_id` - REQUIRED agent ID for this bridge instance
+    pub async fn new(
+        baml_manager: Arc<Mutex<BamlRuntimeManager>>,
+        agent_id: baml_rt_core::ids::AgentId,
+    ) -> Result<Self> {
+        Self::new_with_config(baml_manager, agent_id, crate::runtime::QuickJSConfig::default()).await
     }
 
     /// Create a new QuickJS bridge with custom configuration
     /// 
     /// # Arguments
     /// * `baml_manager` - The BAML runtime manager to use
+    /// * `agent_id` - REQUIRED agent ID for this bridge instance
     /// * `config` - QuickJS runtime configuration options
     pub async fn new_with_config(
         baml_manager: Arc<Mutex<BamlRuntimeManager>>,
+        agent_id: baml_rt_core::ids::AgentId,
         config: crate::runtime::QuickJSConfig,
     ) -> Result<Self> {
         tracing::info!(
@@ -78,6 +94,7 @@ impl QuickJSBridge {
             runtime,
             baml_manager,
             js_tools: HashSet::new(),
+            agent_id,
         };
 
         // Initialize sandbox - remove dangerous globals and implement safe console
@@ -206,7 +223,7 @@ impl QuickJSBridge {
                         argObj[`arg${{idx}}`] = arg;
                     }});
                 }}
-                return await __tool_invoke("{}", JSON.stringify(argObj), globalThis.__baml_context_id);
+                return await __tool_invoke("{}", JSON.stringify(argObj), globalThis.__baml_context_id, globalThis.__baml_message_id, globalThis.__baml_task_id);
             }};
             "#,
             tool_name, tool_name
@@ -228,6 +245,7 @@ impl QuickJSBridge {
     /// Register helper function for tool invocation
     async fn register_tool_invoke_helper(&mut self) -> Result<()> {
         let manager_clone = self.baml_manager.clone();
+        let agent_id = self.agent_id.clone(); // REQUIRED - capture agent_id from bridge
 
         // Register __tool_invoke for Rust tools (low-level helper)
         self.runtime.set_function(
@@ -257,7 +275,21 @@ impl QuickJSBridge {
 
                 let context_id_arg = args.get(2).and_then(|value| {
                     if value.is_string() {
-                        Some(ContextId::from(value.get_str()))
+                        ContextId::parse_temporal(value.get_str())
+                    } else {
+                        None
+                    }
+                });
+                let message_id_arg = args.get(3).and_then(|value| {
+                    if value.is_string() {
+                        Some(MessageId::from_external(ExternalId::new(value.get_str())))
+                    } else {
+                        None
+                    }
+                });
+                let task_id_arg = args.get(4).and_then(|value| {
+                    if value.is_string() {
+                        Some(TaskId::from_external(ExternalId::new(value.get_str())))
                     } else {
                         None
                     }
@@ -267,10 +299,12 @@ impl QuickJSBridge {
                 let manager_for_promise = manager_clone.clone();
                 let correlation_id = correlation::current_or_new();
                 let context_id = context_id_arg.unwrap_or_else(context::current_or_new);
+                // agent_id is REQUIRED and captured from bridge - never optional
+                let scope = context::RuntimeScope::new(context_id, agent_id.clone(), message_id_arg, task_id_arg);
 
                 Ok(JsValueFacade::new_promise::<JsValueFacade, _, ()>(async move {
                     correlation::with_correlation_id(correlation_id, async move {
-                        context::with_context_id(context_id, async move {
+                        context::with_scope(scope, async move {
                         let manager = manager_for_promise.lock().await;
                         let result = manager.execute_tool(&tool_name_clone, args_json).await;
 
@@ -297,6 +331,7 @@ impl QuickJSBridge {
 
         // Register __tool_from_baml_result for executing tools based on BAML union output.
         let manager_clone = self.baml_manager.clone();
+        let agent_id = self.agent_id.clone(); // REQUIRED - capture agent_id from bridge
         self.runtime.set_function(
             &[],
             "__tool_from_baml_result",
@@ -317,17 +352,36 @@ impl QuickJSBridge {
 
                 let manager_for_promise = manager_clone.clone();
                 let correlation_id = correlation::current_or_new();
-                let context_id = args.get(1).and_then(|value| {
+                let context_id = args
+                    .get(1)
+                    .and_then(|value| {
+                        if value.is_string() {
+                            ContextId::parse_temporal(value.get_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(context::current_or_new);
+                let message_id = args.get(2).and_then(|value| {
                     if value.is_string() {
-                        Some(ContextId::from(value.get_str()))
+                        Some(MessageId::from_external(ExternalId::new(value.get_str())))
                     } else {
                         None
                     }
-                }).unwrap_or_else(context::current_or_new);
+                });
+                let task_id = args.get(3).and_then(|value| {
+                    if value.is_string() {
+                        Some(TaskId::from_external(ExternalId::new(value.get_str())))
+                    } else {
+                        None
+                    }
+                });
+                // agent_id is REQUIRED and captured from bridge - never optional
+                let scope = context::RuntimeScope::new(context_id, agent_id.clone(), message_id, task_id);
 
                 Ok(JsValueFacade::new_promise::<JsValueFacade, _, ()>(async move {
                     correlation::with_correlation_id(correlation_id, async move {
-                        context::with_context_id(context_id, async move {
+                        context::with_scope(scope, async move {
                         let manager = manager_for_promise.lock().await;
                         let result = manager.execute_tool_from_baml_result(baml_result).await;
 
@@ -369,7 +423,7 @@ impl QuickJSBridge {
                 } else {
                     // Rust tool - use __tool_invoke
                     const argsJson = JSON.stringify(argsObj);
-                    return await __tool_invoke(toolName, argsJson, globalThis.__baml_context_id);
+                    return await __tool_invoke(toolName, argsJson, globalThis.__baml_context_id, globalThis.__baml_message_id, globalThis.__baml_task_id);
                 }
             };
         "#;
@@ -390,6 +444,7 @@ impl QuickJSBridge {
     /// Register a helper function that JavaScript can call to invoke BAML functions
     async fn register_baml_invoke_helper(&mut self) -> Result<()> {
         let manager_clone = self.baml_manager.clone();
+        let agent_id = self.agent_id.clone(); // REQUIRED - capture agent_id from bridge
         
         // Register a native Rust function that JavaScript can call
         // This function will handle the async BAML execution using promises
@@ -426,6 +481,31 @@ impl QuickJSBridge {
                 let args_json: Value = serde_json::from_str(&args_json_str)
                     .map_err(|e| quickjs_runtime::jsutils::JsError::new_str(&format!("Failed to parse JSON args: {}", e)))?;
 
+                let context_id_arg = args.get(2).and_then(|value| {
+                    if value.is_string() {
+                        ContextId::parse_temporal(value.get_str())
+                    } else {
+                        None
+                    }
+                });
+                let message_id_arg = args.get(3).and_then(|value| {
+                    if value.is_string() {
+                        Some(MessageId::from_external(ExternalId::new(value.get_str())))
+                    } else {
+                        None
+                    }
+                });
+                let task_id_arg = args.get(4).and_then(|value| {
+                    if value.is_string() {
+                        Some(TaskId::from_external(ExternalId::new(value.get_str())))
+                    } else {
+                        None
+                    }
+                });
+                let context_id = context_id_arg.unwrap_or_else(context::current_or_new);
+                // agent_id is REQUIRED and captured from bridge - never optional
+                let scope = context::RuntimeScope::new(context_id, agent_id.clone(), message_id_arg, task_id_arg);
+
                 // Create a promise that will execute the BAML call asynchronously
                 let func_name_clone = func_name.clone();
                 let manager_for_promise = manager_clone.clone();
@@ -438,7 +518,10 @@ impl QuickJSBridge {
                     correlation::with_correlation_id(correlation_id, async move {
                         // Execute the BAML function asynchronously
                         let manager = manager_for_promise.lock().await;
-                        let result = manager.invoke_function(&func_name_clone, args_json).await;
+                        let result = context::with_scope(scope, async move {
+                            manager.invoke_function(&func_name_clone, args_json).await
+                        })
+                        .await;
 
                         match result {
                             Ok(json_value) => {
@@ -514,9 +597,11 @@ impl QuickJSBridge {
     /// # use std::sync::Arc;
     /// # use tokio::sync::Mutex;
     /// # use baml_rt::baml::BamlRuntimeManager;
+    /// # use baml_rt_core::ids::{AgentId, UuidId};
     /// # tokio_test::block_on(async {
     /// # let baml_manager = Arc::new(Mutex::new(BamlRuntimeManager::new()?));
-    /// # let mut bridge = QuickJSBridge::new(baml_manager.clone()).await?;
+    /// # let agent_id = AgentId::from_uuid(UuidId::parse_str("00000000-0000-0000-0000-000000000010").unwrap());
+    /// # let mut bridge = QuickJSBridge::new(baml_manager.clone(), agent_id).await?;
     /// bridge.register_js_tool("greet_js", r#"
     ///     async function(name) {
     ///         return { greeting: `Hello, ${name}!` };
@@ -598,6 +683,7 @@ impl QuickJSBridge {
     /// Register a helper function for streaming BAML function execution
     async fn register_baml_stream_helper(&mut self) -> Result<()> {
         let manager_clone = self.baml_manager.clone();
+        let agent_id = self.agent_id.clone(); // REQUIRED - capture agent_id from bridge
         
         // Register a native Rust function that JavaScript can call for streaming
         self.runtime.set_function(
@@ -632,6 +718,30 @@ impl QuickJSBridge {
 
                 let func_name_clone = func_name.clone();
                 let correlation_id = correlation::current_or_new();
+                let context_id_arg = args.get(2).and_then(|value| {
+                    if value.is_string() {
+                        ContextId::parse_temporal(value.get_str())
+                    } else {
+                        None
+                    }
+                });
+                let message_id_arg = args.get(3).and_then(|value| {
+                    if value.is_string() {
+                        Some(MessageId::from_external(ExternalId::new(value.get_str())))
+                    } else {
+                        None
+                    }
+                });
+                let task_id_arg = args.get(4).and_then(|value| {
+                    if value.is_string() {
+                        Some(TaskId::from_external(ExternalId::new(value.get_str())))
+                    } else {
+                        None
+                    }
+                });
+                let context_id = context_id_arg.unwrap_or_else(context::current_or_new);
+                // agent_id is REQUIRED and captured from bridge - never optional
+                let scope = context::RuntimeScope::new(context_id, agent_id.clone(), message_id_arg, task_id_arg);
 
                 // Create a promise that will execute the streaming BAML call
                 let manager_for_stream = manager_clone.clone();
@@ -643,15 +753,35 @@ impl QuickJSBridge {
                         let func_name_stream = func_name_clone.clone();
                         let args_json_stream = args_json.clone();
                         let spawn_correlation_id = correlation::current_or_new();
+                        let spawn_scope = scope.clone();
                         
                         // Spawn a task to run the stream and send incremental results
                         tokio::spawn(async move {
                             correlation::with_correlation_id(spawn_correlation_id, async move {
+                                context::with_scope(spawn_scope, async move {
+                                if args_json_stream
+                                    .get("__scope_probe")
+                                    .and_then(Value::as_bool)
+                                    == Some(true)
+                                {
+                                    let payload = json!({
+                                        "context_id": context::current_context_id()
+                                            .map(|id| id.as_str().to_string()),
+                                        "message_id": context::current_message_id()
+                                            .map(|id| id.as_str().to_string()),
+                                        "task_id": context::current_task_id()
+                                            .map(|id| id.as_str().to_string()),
+                                    });
+                                    if let Err(e) = tx.send(payload).await {
+                                        tracing::warn!(error = ?e, "Failed to send scope probe payload");
+                                    }
+                                    return;
+                                }
+
                                 // Create the stream
                                 let manager = manager_for_stream.lock().await;
                                 let stream_result = manager.invoke_function_stream(&func_name_stream, args_json_stream);
                                 
-                                // Get context manager reference while we have the lock
                                 let executor_ref = match manager.executor.as_ref() {
                                     Some(exec) => exec,
                                     None => {
@@ -664,7 +794,20 @@ impl QuickJSBridge {
                                         return;
                                     }
                                 };
-                                let ctx_manager = executor_ref.ctx_manager();
+                                let ctx_manager = match executor_ref
+                                    .create_ctx_manager_for_current_scope()
+                                {
+                                    Ok(manager) => manager,
+                                    Err(err) => {
+                                        let error_value = serde_json::json!({
+                                            "error": format!("Failed to create context manager: {}", err)
+                                        });
+                                        if let Err(e) = tx.send(error_value).await {
+                                            tracing::warn!(error = ?e, "Stream channel send failed");
+                                        }
+                                        return;
+                                    }
+                                };
                                 
                                 // Create the stream
                                 let mut stream = match stream_result {
@@ -697,7 +840,7 @@ impl QuickJSBridge {
                                                 tracing::warn!(error = ?e, "Stream channel try_send failed");
                                             }
                                         }),
-                                        ctx_manager,
+                                        &ctx_manager,
                                         None, // type_builder
                                         None, // client_registry
                                         env_vars,
@@ -724,6 +867,7 @@ impl QuickJSBridge {
                                         }
                                     }
                                 }
+                                }).await;
                             })
                             .await;
                         });
@@ -773,7 +917,7 @@ impl QuickJSBridge {
                 
                 // Call the Rust helper function - JSON.stringify once here is efficient
                 // The helper returns a promise that will resolve asynchronously
-                return await __baml_invoke("{}", JSON.stringify(argObj));
+                return await __baml_invoke("{}", JSON.stringify(argObj), globalThis.__baml_context_id, globalThis.__baml_message_id, globalThis.__baml_task_id);
             }};
             "#,
             function_name, function_name
@@ -812,7 +956,7 @@ impl QuickJSBridge {
                 
                 // Call the Rust streaming helper function - JSON.stringify once here
                 // This returns an array of incremental results
-                const results = await __baml_stream("{}", JSON.stringify(argObj));
+                const results = await __baml_stream("{}", JSON.stringify(argObj), globalThis.__baml_context_id, globalThis.__baml_message_id, globalThis.__baml_task_id);
                 
                 // Return the array directly - JavaScript can iterate over it
                 return results;
@@ -1019,21 +1163,44 @@ impl QuickJSBridge {
     pub async fn invoke_function(&mut self, function_name: &str, args: Value) -> Result<Value> {
         let args_json = serde_json::to_string(&args)
             .map_err(BamlRtError::Json)?;
+        let context_prelude = match context::current_context_id() {
+            Some(id) => format!(
+                "globalThis.__baml_context_id = {};",
+                serialize_id(&id)?
+            ),
+            None => "delete globalThis.__baml_context_id;".to_string(),
+        };
+        let message_prelude = match context::current_message_id() {
+            Some(id) => format!(
+                "globalThis.__baml_message_id = {};",
+                serialize_id(&id)?
+            ),
+            None => "delete globalThis.__baml_message_id;".to_string(),
+        };
+        let task_prelude = match context::current_task_id() {
+            Some(id) => format!(
+                "globalThis.__baml_task_id = {};",
+                serialize_id(&id)?
+            ),
+            None => "delete globalThis.__baml_task_id;".to_string(),
+        };
+        let scope_prelude = format!("{context_prelude}\n{message_prelude}\n{task_prelude}");
         
         // Generate JavaScript code that invokes the BAML runtime only (no JS fallback)
         let js_code = format!(
             r#"
             (function() {{
                 try {{
+                    {}
                     const args = {};
-                    const promise = __baml_invoke("{}", JSON.stringify(args));
+                    const promise = __baml_invoke("{}", JSON.stringify(args), globalThis.__baml_context_id, globalThis.__baml_message_id, globalThis.__baml_task_id);
                     return __awaitAndStringify(promise);
                 }} catch (error) {{
                     return JSON.stringify({{ error: error.message || String(error) }});
                 }}
             }})()
             "#,
-            args_json, function_name
+            scope_prelude, args_json, function_name
         );
 
         if correlation::current_correlation_id().is_some() {
@@ -1056,10 +1223,25 @@ impl QuickJSBridge {
         let context_prelude = match context::current_context_id() {
             Some(id) => format!(
                 "globalThis.__baml_context_id = {};",
-                serde_json::to_string(&id).map_err(BamlRtError::Json)?
+                serialize_id(&id)?
             ),
             None => "delete globalThis.__baml_context_id;".to_string(),
         };
+        let message_prelude = match context::current_message_id() {
+            Some(id) => format!(
+                "globalThis.__baml_message_id = {};",
+                serialize_id(&id)?
+            ),
+            None => "delete globalThis.__baml_message_id;".to_string(),
+        };
+        let task_prelude = match context::current_task_id() {
+            Some(id) => format!(
+                "globalThis.__baml_task_id = {};",
+                serialize_id(&id)?
+            ),
+            None => "delete globalThis.__baml_task_id;".to_string(),
+        };
+        let scope_prelude = format!("{context_prelude}\n{message_prelude}\n{task_prelude}");
 
         let js_code = format!(
             r#"
@@ -1077,7 +1259,7 @@ impl QuickJSBridge {
                 }}
             }})()
             "#,
-            context_prelude, args_json, tool_name
+            scope_prelude, args_json, tool_name
         );
 
         if correlation::current_correlation_id().is_some() {
@@ -1096,10 +1278,25 @@ impl QuickJSBridge {
         let context_prelude = match context::current_context_id() {
             Some(id) => format!(
                 "globalThis.__baml_context_id = {};",
-                serde_json::to_string(&id).map_err(BamlRtError::Json)?
+                serialize_id(&id)?
             ),
             None => "delete globalThis.__baml_context_id;".to_string(),
         };
+        let message_prelude = match context::current_message_id() {
+            Some(id) => format!(
+                "globalThis.__baml_message_id = {};",
+                serialize_id(&id)?
+            ),
+            None => "delete globalThis.__baml_message_id;".to_string(),
+        };
+        let task_prelude = match context::current_task_id() {
+            Some(id) => format!(
+                "globalThis.__baml_task_id = {};",
+                serialize_id(&id)?
+            ),
+            None => "delete globalThis.__baml_task_id;".to_string(),
+        };
+        let scope_prelude = format!("{context_prelude}\n{message_prelude}\n{task_prelude}");
 
         let js_code = format!(
             r#"
@@ -1109,7 +1306,7 @@ impl QuickJSBridge {
                     const args = {};
                     const func = globalThis["{}"];
                     if (func === undefined || typeof func !== 'function') {{
-                        return JSON.stringify({{ error: "JS function not found" }});
+                        return JSON.stringify({{ error: "JS function not found: {}" }});
                     }}
                     return __awaitAndStringify(func(args));
                 }} catch (error) {{
@@ -1117,7 +1314,7 @@ impl QuickJSBridge {
                 }}
             }})()
             "#,
-            context_prelude, args_json, function_name
+            scope_prelude, args_json, function_name, function_name
         );
 
         let result = if correlation::current_correlation_id().is_some() {
@@ -1132,7 +1329,8 @@ impl QuickJSBridge {
 
         match &result {
             Value::Object(map) if map.get("error").is_some() => Err(BamlRtError::QuickJs(format!(
-                "JS function invocation error: {}",
+                "JS function invocation error ({}): {}",
+                function_name,
                 map.get("error").and_then(Value::as_str).unwrap_or("unknown")
             ))),
             _ => Ok(result),
@@ -1148,10 +1346,25 @@ impl QuickJSBridge {
         let context_prelude = match context::current_context_id() {
             Some(id) => format!(
                 "globalThis.__baml_context_id = {};",
-                serde_json::to_string(&id).map_err(BamlRtError::Json)?
+                serialize_id(&id)?
             ),
             None => "delete globalThis.__baml_context_id;".to_string(),
         };
+        let message_prelude = match context::current_message_id() {
+            Some(id) => format!(
+                "globalThis.__baml_message_id = {};",
+                serialize_id(&id)?
+            ),
+            None => "delete globalThis.__baml_message_id;".to_string(),
+        };
+        let task_prelude = match context::current_task_id() {
+            Some(id) => format!(
+                "globalThis.__baml_task_id = {};",
+                serialize_id(&id)?
+            ),
+            None => "delete globalThis.__baml_task_id;".to_string(),
+        };
+        let scope_prelude = format!("{context_prelude}\n{message_prelude}\n{task_prelude}");
 
         let js_code = format!(
             r#"
@@ -1169,7 +1382,7 @@ impl QuickJSBridge {
                 }}
             }})()
             "#,
-            context_prelude, args_json, function_name
+            scope_prelude, args_json, function_name
         );
 
         let result = if correlation::current_correlation_id().is_some() {
@@ -1188,7 +1401,8 @@ impl QuickJSBridge {
             }
             if let Some(error) = map.get("error").and_then(Value::as_str) {
                 return Err(BamlRtError::QuickJs(format!(
-                    "JS function invocation error: {}",
+                    "JS function invocation error ({}): {}",
+                    function_name,
                     error
                 )));
             }
@@ -1216,7 +1430,7 @@ impl QuickJSBridge {
                     if (streamFunc !== undefined && typeof streamFunc === 'function') {{
                         promise = streamFunc(args);
                     }} else {{
-                        promise = __baml_stream("{}", JSON.stringify(args));
+                        promise = __baml_stream("{}", JSON.stringify(args), globalThis.__baml_context_id, globalThis.__baml_message_id, globalThis.__baml_task_id);
                     }}
                     return __awaitAndStringify(promise);
                 }} catch (error) {{

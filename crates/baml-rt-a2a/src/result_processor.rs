@@ -42,20 +42,43 @@ impl TaskProcessor {
         status_update: Option<TaskStatusUpdateEvent>,
         artifact_update: Option<TaskArtifactUpdateEvent>,
     ) -> Result<()> {
-        if let Some(task) = task {
+        // Extract agent_id from message metadata for injection into tasks if needed
+        let agent_id_from_message = message.as_ref()
+            .and_then(|msg| msg.metadata.as_ref())
+            .and_then(|meta| meta.get("agent_id"))
+            .cloned();
+        
+        // Extract agent_id from task metadata (after potential injection) for messages
+        let mut task_agent_id_opt = None;
+        
+        if let Some(mut task) = task {
+            // Inject agent_id into task metadata if missing (from request metadata)
+            // This ensures tasks created from JS responses have agent_id for provenance
+            if !task.metadata.as_ref().is_some_and(|m| m.contains_key("agent_id"))
+                && let Some(agent_id_value) = agent_id_from_message.clone()
+            {
+                let mut metadata = task.metadata.unwrap_or_default();
+                metadata.insert("agent_id".to_string(), agent_id_value);
+                task.metadata = Some(metadata);
+            }
+            
+            // Extract agent_id from task for later use with messages
+            task_agent_id_opt = task.metadata.as_ref()
+                .and_then(|meta| meta.get("agent_id"))
+                .cloned();
+            
             let status = task.status.clone();
             let context_id = task.context_id.clone();
             let task_id = task.id.clone();
             let artifacts = task.artifacts.clone();
             self.task_store.upsert(task).await;
-            if let Some(status) = status {
-                if let Some(event) = self
+            if let Some(status) = status
+                && let Some(event) = self
                     .task_store
                     .record_status_update(task_id.clone(), context_id.clone(), status)
                     .await
-                {
-                    self.emitter.emit(event).await;
-                }
+            {
+                self.emitter.emit(event).await;
             }
             if let Some(task_id) = task_id {
                 for artifact in artifacts {
@@ -75,22 +98,29 @@ impl TaskProcessor {
                 }
             }
         }
-        if let Some(message) = message {
-            self.task_store.insert_message(&message).await;
-        }
-        if let Some(update) = status_update {
-            if let Some(status) = update.status {
-                if let Some(event) = self
-                    .task_store
-                    .record_status_update(update.task_id.clone(), update.context_id.clone(), status)
-                    .await
-                {
-                    self.emitter.emit(event).await;
-                }
+        if let Some(mut msg) = message {
+            // Ensure message has agent_id in metadata for provenance
+            // If missing, try to get it from task metadata (from above) or use message's own
+            if !msg.metadata.as_ref().is_some_and(|m| m.contains_key("agent_id"))
+                && let Some(agent_id_value) = task_agent_id_opt.or(agent_id_from_message)
+            {
+                let mut metadata = msg.metadata.unwrap_or_default();
+                metadata.insert("agent_id".to_string(), agent_id_value);
+                msg.metadata = Some(metadata);
             }
+            self.task_store.insert_message(&msg).await;
         }
-        if let Some(update) = artifact_update {
-            if let Some(event) = self
+        if let Some(update) = status_update
+            && let Some(status) = update.status
+            && let Some(event) = self
+                .task_store
+                .record_status_update(update.task_id.clone(), update.context_id.clone(), status)
+                .await
+        {
+            self.emitter.emit(event).await;
+        }
+        if let Some(update) = artifact_update
+            && let Some(event) = self
                 .task_store
                 .record_artifact_update(
                     update.task_id.clone(),
@@ -100,9 +130,8 @@ impl TaskProcessor {
                     update.last_chunk,
                 )
                 .await
-            {
-                self.emitter.emit(event).await;
-            }
+        {
+            self.emitter.emit(event).await;
         }
         Ok(())
     }

@@ -1,6 +1,7 @@
 //! A2A request handler interface for non-standard transports.
 
 use crate::a2a;
+use crate::a2a_types::SendMessageRequest;
 use crate::a2a_store::{
     ProvenanceTaskStore, TaskEventRecorder, TaskRepository, TaskStoreBackend, TaskUpdateQueue,
     TaskUpdateEvent,
@@ -30,6 +31,7 @@ use tokio::sync::Mutex;
 /// Top-level agent type that owns runtime, JS bridge, and A2A comms.
 #[derive(Clone)]
 pub struct A2aAgent {
+    agent_id: baml_rt_core::ids::AgentId,
     runtime: Arc<Mutex<BamlRuntimeManager>>,
     bridge: Arc<Mutex<QuickJSBridge>>,
     task_store: Arc<dyn TaskStoreBackend>,
@@ -41,14 +43,16 @@ pub struct A2aAgent {
 }
 
 impl A2aAgent {
-    /// Create a new agent with a runtime and JS bridge ready for A2A.
-    pub async fn new() -> Result<Self> {
-        A2aAgent::builder().build().await
-    }
-
     /// Create a builder for configuring agent subcomponents.
+    /// 
+    /// `agent_id` is automatically generated for provenance tracking.
     pub fn builder() -> A2aAgentBuilder {
         A2aAgentBuilder::new()
+    }
+
+    /// Get the agent ID (generated during build)
+    pub fn agent_id(&self) -> &baml_rt_core::ids::AgentId {
+        &self.agent_id
     }
 
     /// Access the underlying runtime manager.
@@ -127,9 +131,17 @@ pub struct A2aAgentBuilder {
     init_js: Vec<String>,
     task_store: Option<Arc<dyn TaskStoreBackend>>,
     provenance_writer: Option<Arc<dyn ProvenanceWriter>>,
+    agent_id: Option<baml_rt_core::ids::AgentId>,
+}
+
+impl Default for A2aAgentBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl A2aAgentBuilder {
+    /// Create a new builder. `agent_id` will be automatically generated during build().
     pub fn new() -> Self {
         Self {
             runtime: None,
@@ -139,6 +151,7 @@ impl A2aAgentBuilder {
             init_js: Vec::new(),
             task_store: None,
             provenance_writer: None,
+            agent_id: None, // Will be generated in build()
         }
     }
 
@@ -203,11 +216,17 @@ impl A2aAgentBuilder {
             None => Arc::new(Mutex::new(BamlRuntimeManager::new()?)),
         };
 
+        // Generate agent_id if not provided (REQUIRED for QuickJS bridge)
+        use uuid::Uuid;
+        let agent_id = self.agent_id.unwrap_or_else(|| {
+            baml_rt_core::ids::AgentId::from_uuid(baml_rt_core::ids::UuidId::new(Uuid::new_v4()))
+        });
+
         let bridge = match self.bridge {
             Some(bridge) => bridge,
             None => {
                 let bridge =
-                    QuickJSBridge::new_with_config(runtime.clone(), self.quickjs_config).await?;
+                    QuickJSBridge::new_with_config(runtime.clone(), agent_id.clone(), self.quickjs_config).await?;
                 Arc::new(Mutex::new(bridge))
             }
         };
@@ -230,12 +249,12 @@ impl A2aAgentBuilder {
                 let writer: Arc<dyn ProvenanceWriter> =
                     Arc::new(InMemoryProvenanceStore::new());
                 let store: Arc<dyn TaskStoreBackend> =
-                    Arc::new(ProvenanceTaskStore::new(Some(writer.clone())));
+                    Arc::new(ProvenanceTaskStore::new(Some(writer.clone()), agent_id.clone()));
                 (store, Some(writer))
             }
             (None, Some(writer)) => {
                 let store: Arc<dyn TaskStoreBackend> =
-                    Arc::new(ProvenanceTaskStore::new(Some(writer.clone())));
+                    Arc::new(ProvenanceTaskStore::new(Some(writer.clone()), agent_id.clone()));
                 (store, Some(writer))
             }
         };
@@ -277,6 +296,7 @@ impl A2aAgentBuilder {
                 .await;
         }
         Ok(A2aAgent {
+            agent_id,
             runtime,
             bridge,
             task_store,
@@ -289,11 +309,7 @@ impl A2aAgentBuilder {
     }
 }
 
-impl Default for A2aAgentBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// Default removed - agent_id is generated, use A2aAgent::builder() instead
 
 /// Trait for alternative, non-standard A2A transports.
 ///
@@ -315,10 +331,16 @@ impl A2aRequestHandler for A2aAgent {
             }
         };
         use baml_rt_core::ids::CorrelationId;
-        let correlation_id = parsed_request
-            .correlation_id()
-            .map(|s| CorrelationId::from(s))
-            .unwrap_or_else(correlation::generate_correlation_id);
+        let correlation_id = if let Some(raw) = parsed_request.correlation_id() {
+            CorrelationId::parse_temporal(&raw).ok_or_else(|| {
+                BamlRtError::InvalidArgument(format!(
+                    "Invalid correlation_id '{}': expected corr-<millis>-<counter>",
+                    raw
+                ))
+            })?
+        } else {
+            correlation::generate_correlation_id()
+        };
 
         let span = if parsed_request.is_stream {
             spans::a2a_stream(parsed_request.method.as_str(), correlation_id.as_str())
@@ -332,8 +354,25 @@ impl A2aRequestHandler for A2aAgent {
 
         let request_context_id =
             parsed_request.context_id.clone().unwrap_or_else(context::generate_context_id);
+        let request_message_id = parsed_request.message_id.clone();
+        let request_task_id = parsed_request.task_id.clone();
+        let agent_id = self.agent_id.clone();
         let outcome = correlation::with_correlation_id(correlation_id, async move {
-            context::with_context_id(request_context_id, async move {
+            let scope = context::RuntimeScope::new(
+                request_context_id,
+                agent_id,
+                request_message_id,
+                request_task_id,
+            );
+            context::with_scope(scope, async move {
+                if matches!(
+                    parsed_request.method,
+                    a2a::A2aMethod::MessageSend | a2a::A2aMethod::MessageSendStream
+                ) && let Ok(params) =
+                    serde_json::from_value::<SendMessageRequest>(parsed_request.params.clone())
+                {
+                    self.task_store.insert_message(&params.message).await;
+                }
                 self.request_router.route(&parsed_request).await
             })
             .await

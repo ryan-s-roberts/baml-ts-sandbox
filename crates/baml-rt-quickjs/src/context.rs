@@ -5,6 +5,7 @@
 
 use crate::baml::BamlRuntimeManager;
 use baml_rt_core::Result;
+use baml_rt_core::ids::AgentId;
 use crate::quickjs_bridge::QuickJSBridge;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -46,6 +47,7 @@ impl BamlContext {
     /// ```rust,no_run
     /// use baml_rt::context::{BamlContext, ContextMetadata};
     /// use baml_rt::baml::BamlRuntimeManager;
+    /// use baml_rt_core::ids::{AgentId, UuidId};
     /// use std::sync::Arc;
     /// use tokio::sync::Mutex;
     ///
@@ -54,8 +56,12 @@ impl BamlContext {
     /// baml_manager.lock().await.load_schema("baml_src")?;
     ///
     /// // Create isolated context for user/request
+    /// let agent_id = AgentId::from_uuid(
+    ///     UuidId::parse_str("00000000-0000-0000-0000-000000000010").unwrap()
+    /// );
     /// let mut context = BamlContext::new(
     ///     baml_manager.clone(),
+    ///     agent_id,
     ///     Some(ContextMetadata {
     ///         context_id: "req-123".to_string(),
     ///         user_id: Some("user-456".to_string()),
@@ -73,15 +79,17 @@ impl BamlContext {
     /// ```
     pub async fn new(
         baml_manager: Arc<Mutex<BamlRuntimeManager>>,
+        agent_id: AgentId,
         metadata: Option<ContextMetadata>,
     ) -> Result<Self> {
         tracing::debug!(
             context_id = metadata.as_ref().map(|m| m.context_id.as_str()),
+            agent_id = %agent_id,
             "Creating new BAML context"
         );
 
         Ok(Self {
-            quickjs: QuickJSBridge::new(baml_manager).await?,
+            quickjs: QuickJSBridge::new(baml_manager, agent_id).await?,
             metadata,
         })
     }

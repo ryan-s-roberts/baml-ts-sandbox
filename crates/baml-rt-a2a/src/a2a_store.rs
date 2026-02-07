@@ -1,12 +1,14 @@
 use crate::a2a_types::{
-    Artifact, ListTasksRequest, ListTasksResponse, Message, Task, TaskArtifactUpdateEvent,
-    TaskState, TaskStatus, TaskStatusUpdateEvent, TASK_STATE_CANCELED,
+    Artifact, ListTasksRequest, ListTasksResponse, Message, MessageRole, Task,
+    TaskArtifactUpdateEvent, TaskState, TaskStatus, TaskStatusUpdateEvent, ROLE_USER, TASK_STATE_CANCELED,
 };
 use async_trait::async_trait;
 use baml_rt_core::context;
-use baml_rt_core::ids::{ContextId, TaskId};
+use baml_rt_core::ids::{AgentId, ContextId, TaskId};
 use baml_rt_provenance::{ProvEvent, ProvenanceWriter};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
+use serde_json::Value;
 use std::sync::Arc;
 use std::collections::HashMap;
 
@@ -134,13 +136,15 @@ impl TaskUpdateQueue for Mutex<TaskStore> {
 pub struct ProvenanceTaskStore {
     inner: Mutex<TaskStore>,
     writer: Option<Arc<dyn ProvenanceWriter>>,
+    agent_id: AgentId,
 }
 
 impl ProvenanceTaskStore {
-    pub fn new(writer: Option<Arc<dyn ProvenanceWriter>>) -> Self {
+    pub fn new(writer: Option<Arc<dyn ProvenanceWriter>>, agent_id: AgentId) -> Self {
         Self {
             inner: Mutex::new(TaskStore::new()),
             writer,
+            agent_id,
         }
     }
 
@@ -151,15 +155,30 @@ impl ProvenanceTaskStore {
     }
 }
 
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 #[async_trait]
 impl TaskRepository for ProvenanceTaskStore {
-    async fn upsert(&self, task: Task) -> Option<Task> {
+    async fn upsert(&self, mut task: Task) -> Option<Task> {
         let context_id = task
             .context_id
             .clone()
             .unwrap_or_else(context::current_or_new);
+        
+        // Always inject agent_id into task metadata from store-level agent_id
+        if !task.metadata.as_ref().is_some_and(|m| m.contains_key("agent_id")) {
+            let mut metadata = task.metadata.unwrap_or_default();
+            metadata.insert("agent_id".to_string(), Value::String(self.agent_id.as_str().to_string()));
+            task.metadata = Some(metadata);
+        }
+        
         if let Some(task_id) = task.id.clone() {
-            let event = ProvEvent::task_created(context_id, task_id, None);
+            let event = ProvEvent::task_created(context_id, task_id, self.agent_id.clone());
             self.record_event(event).await;
         }
         let mut store = self.inner.lock().await;
@@ -182,10 +201,98 @@ impl TaskRepository for ProvenanceTaskStore {
     }
 
     async fn insert_message(&self, message: &Message) {
+        let context_id = message
+            .context_id
+            .clone()
+            .unwrap_or_else(context::current_or_new);
+        let task_id = message.task_id.clone();
+        let role = message_role_string(&message.role);
+        let content = message_content(message);
+        
+        // Always inject agent_id into message metadata from store-level agent_id
+        let mut msg_metadata = message.metadata.clone();
+        if !msg_metadata.as_ref().is_some_and(|m| m.contains_key("agent_id")) {
+            let mut metadata = msg_metadata.unwrap_or_default();
+            metadata.insert("agent_id".to_string(), Value::String(self.agent_id.as_str().to_string()));
+            msg_metadata = Some(metadata);
+        }
+        
+        let metadata = msg_metadata
+            .as_ref()
+            .map(metadata_string_map);
+
+        // agent_id is always available from store level
+        if let Some(task_id) = task_id.clone() {
+            let event = ProvEvent::task_created(context_id.clone(), task_id, self.agent_id.clone());
+            self.record_event(event).await;
+        }
+        let task_id_for_event = task_id.clone();
+
+        let event = match (role.as_str(), task_id_for_event.clone()) {
+            (ROLE_USER, Some(task_id)) => ProvEvent::message_received_task(
+                context_id.clone(),
+                task_id,
+                message.message_id.as_message_id().clone(),
+                role,
+                content,
+                metadata,
+                now_millis(),
+            ),
+            (ROLE_USER, None) => ProvEvent::message_received_global(
+                context_id.clone(),
+                message.message_id.as_message_id().clone(),
+                role,
+                content,
+                metadata,
+                now_millis(),
+            ),
+            (_, Some(task_id)) => ProvEvent::message_sent_task(
+                context_id.clone(),
+                task_id,
+                message.message_id.as_message_id().clone(),
+                role,
+                content,
+                metadata,
+                now_millis(),
+            ),
+            (_, None) => ProvEvent::message_sent_global(
+                context_id.clone(),
+                message.message_id.as_message_id().clone(),
+                role,
+                content,
+                metadata,
+                now_millis(),
+            ),
+        };
+        self.record_event(event).await;
+
         let mut store = self.inner.lock().await;
         store.insert_message(message);
     }
 }
+
+fn message_role_string(role: &MessageRole) -> String {
+    match role {
+        MessageRole::String(value) => value.clone(),
+        MessageRole::Integer(value) => value.to_string(),
+    }
+}
+
+fn message_content(message: &Message) -> Vec<String> {
+    message
+        .parts
+        .iter()
+        .filter_map(|part| part.text.clone())
+        .collect()
+}
+
+fn metadata_string_map(metadata: &HashMap<String, Value>) -> HashMap<String, String> {
+    metadata
+        .iter()
+        .filter_map(|(key, value)| value.as_str().map(|v| (key.clone(), v.to_string())))
+        .collect()
+}
+
 
 #[async_trait]
 impl TaskEventRecorder for ProvenanceTaskStore {

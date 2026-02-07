@@ -2,10 +2,10 @@ use baml_rt_a2a::a2a_types::{JSONRPCId, JSONRPCRequest, Message, MessageRole, Pa
 use baml_rt_a2a::{A2aAgent, A2aRequestHandler};
 use baml_rt::{BamlRuntimeManager, Result};
 use baml_rt::tools::BamlTool;
-use baml_rt_core::ids::{ContextId, MessageId};
+use baml_rt_core::ids::{ContextId, ExternalId};
+use baml_rt_a2a::a2a_types::A2aMessageId;
 use baml_rt_provenance::InMemoryProvenanceStore;
-use baml_rt_provenance::{ProvEventData, ProvEventType};
-use baml_rt_a2a::a2a_store::ProvenanceTaskStore;
+use baml_rt_provenance::ProvEventData;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,7 +15,7 @@ use serde_json::json;
 
 fn user_message(message_id: &str, text: &str, context_id: Option<ContextId>) -> Message {
     Message {
-        message_id: MessageId::from(message_id),
+        message_id: A2aMessageId::incoming(ExternalId::new(message_id)),
         role: MessageRole::String(ROLE_USER.to_string()),
         parts: vec![Part {
             text: Some(text.to_string()),
@@ -39,15 +39,14 @@ async fn setup_agent(writer: Arc<InMemoryProvenanceStore>) -> A2aAgent {
                 task: {
                     id: "task-ctx",
                     contextId: ctx,
+                    metadata: { agent: "test-agent" },
                     status: { state: "TASK_STATE_WORKING" },
                     history: []
                 }
             };
         };
     "#;
-    let task_store = Arc::new(ProvenanceTaskStore::new(Some(writer.clone())));
     A2aAgent::builder()
-        .with_task_store_backend(task_store)
         .with_provenance_writer(writer)
         .with_init_js(js_code)
         .build()
@@ -83,7 +82,7 @@ async fn test_context_id_propagates_across_agents() {
         jsonrpc: "2.0".to_string(),
         method: "message.send".to_string(),
         params: Some(serde_json::to_value(params).expect("serialize params")),
-        id: Some(JSONRPCId::String("req-1".to_string())),
+        id: Some(JSONRPCId::String("corr-2-1".to_string())),
     };
     let request_value = serde_json::to_value(request).expect("serialize request");
     let responses = agent1.handle_a2a(request_value).await.expect("a2a handle");
@@ -91,7 +90,11 @@ async fn test_context_id_propagates_across_agents() {
 
     let client = A2aInMemoryClient::new(Arc::new(agent2));
     let params = SendMessageRequest {
-        message: user_message("msg-2", "forward", Some(ContextId::from(context_id.clone()))),
+        message: user_message(
+            "msg-2",
+            "forward",
+            Some(ContextId::parse_temporal(&context_id).expect("context id")),
+        ),
         configuration: None,
         metadata: None,
         tenant: None,
@@ -101,15 +104,17 @@ async fn test_context_id_propagates_across_agents() {
         jsonrpc: "2.0".to_string(),
         method: "message.send".to_string(),
         params: Some(serde_json::to_value(params).expect("serialize params")),
-        id: Some(JSONRPCId::String("req-2".to_string())),
+        id: Some(JSONRPCId::String("corr-2-2".to_string())),
     };
     let request_value = serde_json::to_value(request).expect("serialize request");
     let _ = client.send(request_value).await.expect("agent2 handle");
 
     let events = writer2.events().await;
-    let context_id_typed = ContextId::from(context_id);
+    let context_id_typed = ContextId::parse_temporal(&context_id).expect("context id");
     assert!(
-        events.iter().any(|event| event.context_id == context_id_typed),
+        events
+            .iter()
+            .any(|event| event.context_id() == &context_id_typed),
         "expected provenance events to include propagated context_id"
     );
 }
@@ -117,8 +122,6 @@ async fn test_context_id_propagates_across_agents() {
 #[tokio::test(flavor = "current_thread")]
 async fn test_context_id_is_task_local_under_concurrency() {
     let writer = Arc::new(InMemoryProvenanceStore::new());
-    let task_store = Arc::new(ProvenanceTaskStore::new(Some(writer.clone())));
-
     let js_code = r#"
         globalThis.handle_a2a_request = async function(request) {
             const text = request?.params?.message?.parts?.[0]?.text || "";
@@ -133,7 +136,6 @@ async fn test_context_id_is_task_local_under_concurrency() {
         .expect("register echo tool");
 
     let agent = A2aAgent::builder()
-        .with_task_store_backend(task_store)
         .with_provenance_writer(writer.clone())
         .with_runtime_manager(runtime)
         .with_init_js(js_code)
@@ -141,7 +143,7 @@ async fn test_context_id_is_task_local_under_concurrency() {
         .await
         .expect("agent build");
 
-    let context_ids: Vec<String> = (0..8).map(|i| format!("ctx-conc-{i}")).collect();
+    let context_ids: Vec<ContextId> = (0..8).map(|i| ContextId::new(10, i as u64)).collect();
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -156,7 +158,7 @@ async fn test_context_id_is_task_local_under_concurrency() {
                             message: user_message(
                                 &format!("msg-{idx}"),
                                 "hello",
-                                Some(ContextId::from(context_id.clone())),
+                                Some(context_id.clone()),
                             ),
                             configuration: None,
                             metadata: None,
@@ -165,7 +167,7 @@ async fn test_context_id_is_task_local_under_concurrency() {
                         })
                         .expect("serialize params"),
                     ),
-                    id: Some(JSONRPCId::String(format!("req-{idx}"))),
+                    id: Some(JSONRPCId::String(format!("corr-2-{}", idx + 3))),
                 };
                 let request_value = serde_json::to_value(request).expect("serialize request");
                 handles.push(tokio::task::spawn_local(async move {
@@ -184,7 +186,8 @@ async fn test_context_id_is_task_local_under_concurrency() {
 
     let events = writer.events().await;
     for context_id in context_ids {
-        let (starts, completes, successes) = tool_event_counts(&events, "echo_tool", &context_id);
+        let (starts, completes, successes) =
+            tool_event_counts(&events, "echo_tool", &context_id);
         // Current invokeTool -> JS wrapper -> __tool_invoke path produces two tool calls per request.
         assert_eq!(
             starts, 2,
@@ -231,27 +234,27 @@ impl BamlTool for EchoTool {
 fn tool_event_counts(
     events: &[baml_rt_provenance::ProvEvent],
     tool_name: &str,
-    context_id: &str,
+    context_id: &ContextId,
 ) -> (usize, usize, usize) {
     let mut starts = 0;
     let mut completes = 0;
     let mut successes = 0;
-    let context_id = ContextId::from(context_id);
     for event in events {
-        if event.context_id != context_id {
+        if event.context_id() != context_id {
             continue;
         }
-        match &event.data {
-            ProvEventData::ToolCall { tool_name: name, success, .. } if name == tool_name => {
-                match (event.event_type.clone(), success) {
-                    (ProvEventType::ToolCallStarted, None) => starts += 1,
-                    (ProvEventType::ToolCallCompleted, Some(result)) => {
-                        completes += 1;
-                        if *result {
-                            successes += 1;
-                        }
-                    }
-                    _ => {}
+        match event.data() {
+            ProvEventData::ToolCallStarted { tool_name: name, .. } if name == tool_name => {
+                starts += 1;
+            }
+            ProvEventData::ToolCallCompleted {
+                tool_name: name,
+                success,
+                ..
+            } if name == tool_name => {
+                completes += 1;
+                if *success {
+                    successes += 1;
                 }
             }
             _ => {}

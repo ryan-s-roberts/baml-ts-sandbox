@@ -8,7 +8,7 @@ use baml_rt_core::context;
 use baml_rt_interceptor::{InterceptorDecision, InterceptorRegistry, LLMCallContext};
 use baml_runtime::RuntimeContextManager;
 use baml_types::{BamlMap, BamlValue};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -46,17 +46,21 @@ pub fn extract_context_from_http_request(
         }
     };
 
+    let mut metadata_map = serde_json::Map::new();
+    metadata_map.insert("url".to_string(), Value::String(http_request.url.clone()));
+    metadata_map.insert("method".to_string(), Value::String(http_request.method.clone()));
+    metadata_map.insert("id".to_string(), Value::String(http_request.id.to_string()));
+    if let Some(message_id) = context::current_message_id() {
+        metadata_map.insert("message_id".to_string(), Value::String(message_id.as_str().to_string()));
+    }
+
     LLMCallContext {
         client,
         model,
         function_name: function_name.to_string(),
         context_id: context::current_or_new(),
         prompt,
-        metadata: json!({
-            "url": http_request.url.clone(),
-            "method": http_request.method.clone(),
-            "id": http_request.id.to_string(),
-        }),
+        metadata: Value::Object(metadata_map),
     }
 }
 

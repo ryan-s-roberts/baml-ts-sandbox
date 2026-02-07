@@ -64,7 +64,11 @@ pub fn setup_baml_runtime_from_fixture(fixture_name: &str) -> Arc<Mutex<BamlRunt
 }
 
 pub async fn setup_bridge(baml_manager: Arc<Mutex<BamlRuntimeManager>>) -> QuickJSBridge {
-    let mut bridge = QuickJSBridge::new(baml_manager).await.expect("Create QuickJS bridge");
+    use baml_rt_core::ids::AgentId;
+    use uuid::Uuid;
+    // Generate a temporary agent_id for test context
+    let temp_agent_id = AgentId::from_uuid(baml_rt_core::ids::UuidId::new(Uuid::new_v4()));
+    let mut bridge = QuickJSBridge::new(baml_manager, temp_agent_id).await.expect("Create QuickJS bridge");
     bridge
         .register_baml_functions()
         .await
